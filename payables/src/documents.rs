@@ -10,6 +10,18 @@ use bilibi_finance_ledger::{
 use rust_decimal::RoundingStrategy;
 use serde_json::json;
 
+pub(super) enum PreparedPosting {
+    Held(Document, Vec<MatchLine>),
+    Post {
+        document: Document,
+        payable: i64,
+        entry: NewEntry,
+        options: PostOptions,
+        matched: Option<Vec<MatchLine>>,
+        capacity: serde_json::Value,
+    },
+}
+
 fn checked(amount: Money, units: MinorUnits, field: &'static str, positive: bool) -> Result<Money> {
     let amount = Money::new(amount.amount(), units).map_err(|e| invalid(field, e.to_string()))?;
     if amount < Money::ZERO || (positive && amount.is_zero()) {
@@ -23,6 +35,25 @@ fn checked(amount: Money, units: MinorUnits, field: &'static str, positive: bool
         ));
     }
     Ok(amount)
+}
+// Retain the dated capacity as a review fact, even when a changed balance
+// would still permit the note. Consent covers the facts, not just validity.
+async fn note_capacity(
+    c: &dyn OperationClient,
+    tenant: i64,
+    company: i64,
+    bill: Option<i64>,
+    as_of: Date,
+    amount: Money,
+) -> Result<serde_json::Value> {
+    let Some(bill) = bill else {
+        return Ok(serde_json::Value::Null);
+    };
+    let lowest = balances::lowest(c, tenant, company, bill, as_of).await?;
+    if amount > lowest {
+        return Err(PayablesError::ExceedsOutstanding);
+    }
+    Ok(json!({"bill_id":bill,"as_of":as_of.to_string(),"lowest_outstanding":lowest}))
 }
 fn filters(kind: &Option<String>, status: &Option<String>) -> Result<()> {
     if kind
@@ -74,11 +105,30 @@ impl Payables {
                 "finance.payables.create_document",
             )
             .await?;
+        let result = self
+            .create_document_on(&mut tx, s, company, bill, input)
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+    pub(super) async fn prepare_document(
+        &self,
+        c: &dyn OperationClient,
+        s: &Scope,
+        company: i64,
+        bill: Option<i64>,
+        input: &NewDocument,
+    ) -> Result<(
+        serde_json::Value,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        serde_json::Value,
+    )> {
         let tenant = s.tenant();
         let actor = s.user();
         let imp = s.impersonator().map(|p| p.user());
         let original = if let Some(id) = bill {
-            let b = store::document(tx.sql(), tenant, company, id)
+            let b = store::document_record(c, tenant, company, id)
                 .await?
                 .ok_or(PayablesError::DocumentNotFound)?;
             if b.document_type != "bill" || b.status != "posted" {
@@ -113,12 +163,12 @@ impl Payables {
         if due < input.document_date {
             return Err(invalid("due_date", "cannot be before the document date"));
         }
-        if bill.is_none() && tx.sql().query_opt("SELECT id FROM finance_payables_documents WHERE tenant_id=$1 AND company_id=$2 AND party_key=$3 AND party_document_number=$4 AND document_type='bill' AND status<>'voided'",&[&tenant,&company,&key,&number]).await?.is_some() {
+        if bill.is_none() && c.query_opt("SELECT id FROM finance_payables_documents WHERE tenant_id=$1 AND company_id=$2 AND party_key=$3 AND party_document_number=$4 AND document_type='bill' AND status<>'voided'",&[&tenant,&company,&key,&number]).await?.is_some() {
             return Err(invalid("party_document_number","is already recorded for this party"));
         }
-        let book = self.ledger.get_book_on(tx.sql(), s, company).await?;
-        let accounts = self.ledger.list_accounts_on(tx.sql(), s, company).await?;
-        let codes = store::taxes(tx.sql(), tenant, company).await?;
+        let book = self.ledger.get_book_on(c, s, company).await?;
+        let accounts = self.ledger.list_accounts_on(c, s, company).await?;
+        let codes = store::taxes(c, tenant, company).await?;
         if input.lines.is_empty() {
             return Err(invalid("lines", "needs at least one line"));
         }
@@ -205,11 +255,11 @@ impl Payables {
             .enumerate()
             .map(|(i, l)| (i + 1, l.order_line_id, l.quantity))
             .collect();
-        if let Some(b) = &original {
-            matching::within_billed(tx.sql(), tenant, company, b, &named, None).await?;
+        let quantity_capacity = if let Some(b) = &original {
+            matching::within_billed(c, tenant, company, b, &named, None).await?
         } else {
             let ids: Vec<i64> = named.iter().filter_map(|n| n.1).collect();
-            let known = orders::known(tx.sql(), tenant, company, &ids).await?;
+            let known = orders::known(c, tenant, company, &ids).await?;
             let missing: Vec<FieldError> = named
                 .iter()
                 .filter(|n| n.1.is_some_and(|id| !known.contains(&id)))
@@ -224,7 +274,8 @@ impl Payables {
             if !missing.is_empty() {
                 return Err(PayablesError::Invalid(missing));
             }
-        }
+            Default::default()
+        };
         let mut stated = std::collections::BTreeMap::new();
         if let Some(taxes) = &input.tax_lines {
             for tax in taxes {
@@ -260,15 +311,28 @@ impl Payables {
             taxes.push(json!({"tenant_id":tenant,"company_id":company,"line_number":i+1,"tax_code_id":id,"tax_code":code.code,"rate":code.rate,"account_id":code.account_id,"taxable_amount":base,"tax_amount":amount}));
         }
         let total = checked(net + tax_total, book.minor_units, "total", true)?;
-        if let Some(b) = &original {
-            if total
-                > balances::lowest(tx.sql(), tenant, company, b.id, input.document_date).await?
-            {
-                return Err(PayablesError::ExceedsOutstanding);
-            }
+        let mut capacity =
+            note_capacity(c, tenant, company, bill, input.document_date, total).await?;
+        if bill.is_some() {
+            capacity["order_line_quantities"] = json!(quantity_capacity);
         }
         let kind = if bill.is_some() { "debit_note" } else { "bill" };
         let header = json!({"tenant_id":tenant,"company_id":company,"document_type":kind,"status":"draft","corrects_document_id":bill,"party_key":key,"party_name":name,"party_tax_id":tax_id,"party_registration_id":registration,"party_address":address,"party_document_number":number,"document_date":input.document_date.to_string(),"due_date":due.to_string(),"currency_code":book.currency_code,"description":description,"total_net":net,"total_tax":tax_total,"total":total,"created_by_user_id":actor,"created_by_impersonator_id":imp});
+        Ok((header, lines, taxes, capacity))
+    }
+    pub(super) async fn create_document_on(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        s: &Scope,
+        company: i64,
+        bill: Option<i64>,
+        input: &NewDocument,
+    ) -> Result<Document> {
+        join(tx, s, company, CREATE_DOCUMENTS).await?;
+        let (header, lines, taxes, _) = self
+            .prepare_document(tx.sql(), s, company, bill, input)
+            .await?;
+        let tenant = s.tenant();
         let document = tx
             .mutate(move |sql| {
                 Box::pin(async move {
@@ -290,7 +354,6 @@ impl Payables {
                 })
             })
             .await?;
-        tx.commit().await?;
         Ok(document)
     }
     pub async fn approve_document(&self, s: &Scope, company: i64, id: i64) -> Result<Document> {
@@ -304,6 +367,18 @@ impl Payables {
                 "finance.payables.approve_document",
             )
             .await?;
+        let result = self.approve_document_on(&mut tx, s, company, id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+    pub(super) async fn approve_document_on(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        s: &Scope,
+        company: i64,
+        id: i64,
+    ) -> Result<Document> {
+        join(tx, s, company, APPROVE_DOCUMENTS).await?;
         let d = store::document(tx.sql(), s.tenant(), company, id)
             .await?
             .ok_or(PayablesError::DocumentNotFound)?;
@@ -311,26 +386,9 @@ impl Payables {
             return Err(PayablesError::NotDraft);
         }
         self.ledger
-            .check_approval(
-                &mut tx,
-                s,
-                company,
-                &Approval {
-                    source: MODULE.into(),
-                    action: "document_approval".into(),
-                    subject_type: d.document_type.clone(),
-                    subject_id: id,
-                    subject: d.label(),
-                    prepared_by: vec![Preparer {
-                        user_id: d.created_by_user_id,
-                        impersonator_id: d.created_by_impersonator_id,
-                    }],
-                    override_reason: None,
-                },
-            )
+            .check_approval(tx, s, company, &approval(&d))
             .await?;
-        let result = advance(&mut tx, s, company, id, "approved", None, None).await?;
-        tx.commit().await?;
+        let result = advance(tx, s, company, id, "approved", None, None).await?;
         Ok(result)
     }
     pub async fn void_document(
@@ -350,6 +408,21 @@ impl Payables {
                 "finance.payables.void_document",
             )
             .await?;
+        let result = self
+            .void_document_on(&mut tx, s, company, id, reason)
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+    pub(super) async fn void_document_on(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        s: &Scope,
+        company: i64,
+        id: i64,
+        reason: &str,
+    ) -> Result<Document> {
+        join(tx, s, company, APPROVE_DOCUMENTS).await?;
         let d = store::document(tx.sql(), s.tenant(), company, id)
             .await?
             .ok_or(PayablesError::DocumentNotFound)?;
@@ -357,8 +430,7 @@ impl Payables {
             return Err(PayablesError::NotVoidable);
         }
         let reason = string(reason, "void_reason", 500, true)?;
-        let result = advance(&mut tx, s, company, id, "voided", reason, None).await?;
-        tx.commit().await?;
+        let result = advance(tx, s, company, id, "voided", reason, None).await?;
         Ok(result)
     }
     pub async fn post_document(&self, s: &Scope, company: i64, id: i64) -> Result<Document> {
@@ -372,22 +444,41 @@ impl Payables {
                 "finance.payables.post_document",
             )
             .await?;
-        let d = store::document(tx.sql(), s.tenant(), company, id)
+        let result = self.post_document_on(&mut tx, s, company, id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+    pub(super) async fn prepare_post_document(
+        &self,
+        c: &dyn OperationClient,
+        s: &Scope,
+        company: i64,
+        id: i64,
+    ) -> Result<PreparedPosting> {
+        let d = store::document_record(c, s.tenant(), company, id)
             .await?
             .ok_or(PayablesError::DocumentNotFound)?;
         if !matches!(d.status.as_str(), "approved" | "held") {
             return Err(PayablesError::NotApproved);
         }
-        let actor = (s.user(), s.impersonator().map(|p| p.user()));
+        let mut capacity = note_capacity(
+            c,
+            s.tenant(),
+            company,
+            d.corrects_document_id,
+            d.document_date,
+            d.total,
+        )
+        .await?;
         let mut matched = None;
         if d.document_type == "bill" && d.lines.iter().any(|l| l.order_line_id.is_some()) {
-            let settings = store::settings(tx.sql(), s.tenant(), company)
+            let settings = store::settings(c, s.tenant(), company)
                 .await?
                 .ok_or(PayablesError::PayablesNotConfigured)?
                 .1;
-            let book = self.ledger.get_book_on(tx.sql(), s, company).await?;
+            let book = self.ledger.get_book_on(c, s, company).await?;
             let lines = matching::evaluate(
-                tx.sql(),
+                c,
                 s.tenant(),
                 company,
                 &d,
@@ -399,35 +490,29 @@ impl Payables {
             if !lines.iter().all(|l| l.exceptions.is_empty())
                 && !matching::covered(&approved_lines(&d), &lines)
             {
-                return self.hold(tx, s, company, d, actor, lines).await;
+                return Ok(PreparedPosting::Held(d, lines));
             }
             matched = Some(lines);
         }
         let payable = if let Some(bill) = d.corrects_document_id {
-            let b = store::document(tx.sql(), s.tenant(), company, bill)
+            let b = store::document_record(c, s.tenant(), company, bill)
                 .await?
                 .ok_or(PayablesError::DocumentNotFound)?;
-            if d.total
-                > balances::lowest(tx.sql(), s.tenant(), company, bill, d.document_date).await?
-            {
-                return Err(PayablesError::ExceedsOutstanding);
-            }
             let named: Vec<_> = d
                 .lines
                 .iter()
                 .map(|l| (l.line_number as usize, l.order_line_id, l.quantity))
                 .collect();
-            if let Err(e) =
-                matching::within_billed(tx.sql(), s.tenant(), company, &b, &named, Some(id)).await
-            {
-                return Err(match e {
+            let quantities = matching::within_billed(c, s.tenant(), company, &b, &named, Some(id))
+                .await
+                .map_err(|e| match e {
                     PayablesError::Invalid(_) => PayablesError::ExceedsBilledQuantity,
                     e => e,
-                });
-            }
+                })?;
+            capacity["order_line_quantities"] = json!(quantities);
             b.payable_account_id.ok_or(PayablesError::NotPostedBill)?
         } else {
-            store::settings(tx.sql(), s.tenant(), company)
+            store::settings(c, s.tenant(), company)
                 .await?
                 .ok_or(PayablesError::PayablesNotConfigured)?
                 .1
@@ -466,26 +551,54 @@ impl Payables {
         } else {
             format!("Debit note to {}", d.party.name)
         };
+        let new = NewEntry {
+            entry_date: d.document_date,
+            description: description.chars().take(500).collect(),
+            reference: d.party_document_number.clone(),
+            lines,
+        };
+        let options = PostOptions {
+            owner: Some(EntryOwner {
+                module: MODULE.into(),
+                record: format!("document:{id}"),
+            }),
+            settlement_account_ids: if debit { vec![] } else { vec![payable] },
+        };
+        Ok(PreparedPosting::Post {
+            document: d,
+            payable,
+            entry: new,
+            options,
+            matched,
+            capacity,
+        })
+    }
+    pub(super) async fn post_document_on(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        s: &Scope,
+        company: i64,
+        id: i64,
+    ) -> Result<Document> {
+        join(tx, s, company, POST_DOCUMENTS).await?;
+        let prepared = self.prepare_post_document(tx.sql(), s, company, id).await?;
+        let actor = (s.user(), s.impersonator().map(|p| p.user()));
+        let (d, payable, new, options, matched) = match prepared {
+            PreparedPosting::Held(d, lines) => {
+                return self.hold(tx, s, company, d, actor, lines).await
+            }
+            PreparedPosting::Post {
+                document,
+                payable,
+                entry,
+                options,
+                matched,
+                ..
+            } => (document, payable, entry, options, matched),
+        };
         let entry = self
             .ledger
-            .post_entry_in(
-                &mut tx,
-                s,
-                company,
-                &NewEntry {
-                    entry_date: d.document_date,
-                    description: description.chars().take(500).collect(),
-                    reference: d.party_document_number.clone(),
-                    lines,
-                },
-                &PostOptions {
-                    owner: Some(EntryOwner {
-                        module: MODULE.into(),
-                        record: format!("document:{id}"),
-                    }),
-                    settlement_account_ids: if debit { vec![] } else { vec![payable] },
-                },
-            )
+            .post_entry_in(tx, s, company, &new, &options)
             .await?;
         if let Some(lines) = matched {
             let (tenant, document) = (s.tenant(), d.clone());
@@ -507,7 +620,7 @@ impl Payables {
             .await?;
         }
         let result = advance(
-            &mut tx,
+            tx,
             s,
             company,
             id,
@@ -516,13 +629,12 @@ impl Payables {
             Some((payable, entry.id, entry.entry_number)),
         )
         .await?;
-        tx.commit().await?;
         Ok(result)
     }
     /// Records the hold and keeps (or makes) the bill `held`; nothing posts.
     async fn hold(
         &self,
-        mut tx: MutationTransaction<'_>,
+        tx: &mut MutationTransaction<'_>,
         s: &Scope,
         company: i64,
         d: Document,
@@ -552,9 +664,8 @@ impl Payables {
                 .await?
                 .ok_or(PayablesError::DocumentNotFound)?
         } else {
-            advance(&mut tx, s, company, id, "held", None, None).await?
+            advance(tx, s, company, id, "held", None, None).await?
         };
-        tx.commit().await?;
         Ok(result)
     }
     /// Approves a held bill's match exceptions with a reason and the hold the
@@ -668,7 +779,7 @@ impl Payables {
     /// pool connection while the caller holds the company write lock.
     pub async fn get_document_on(
         &self,
-        c: &impl GenericClient,
+        c: &(impl GenericClient + Sync),
         s: &Scope,
         company: i64,
         id: i64,
@@ -740,6 +851,20 @@ impl Payables {
             page: q.page,
             page_size: q.page_size,
         })
+    }
+}
+pub(super) fn approval(d: &Document) -> Approval {
+    Approval {
+        source: MODULE.into(),
+        action: "document_approval".into(),
+        subject_type: d.document_type.clone(),
+        subject_id: d.id,
+        subject: d.label(),
+        prepared_by: vec![Preparer {
+            user_id: d.created_by_user_id,
+            impersonator_id: d.created_by_impersonator_id,
+        }],
+        override_reason: None,
     }
 }
 async fn advance(

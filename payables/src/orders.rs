@@ -86,6 +86,13 @@ impl Subscribe for PurchaseOrders {
             let order: OrderSnapshot =
                 serde_json::from_value(event.payload.clone()).map_err(|_| Error::Invalid)?;
             let tenant = scope.tenant();
+            // Serialize projection changes with the reviewed Payables write.
+            // Delivery retains its system authorization and archive policy.
+            tx.query_opt(
+                "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&tenant, &order.company_id],
+            )
+            .await?;
             let mut changes = Vec::new();
             for line in &order.lines {
                 let facts = json!({"order_id": order.order_id, "order_number": order.order_number,
@@ -179,6 +186,11 @@ impl Subscribe for GoodsReceipts {
             };
             let tenant = scope.tenant();
             let company = posted.company_id;
+            tx.query_opt(
+                "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&tenant, &company],
+            )
+            .await?;
             let line = &posted.line;
             if tx
                 .query_opt(
@@ -270,7 +282,7 @@ pub(crate) struct OrderLine {
     pub received_quantity: Decimal,
 }
 pub(crate) async fn order_line(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     order_line: i64,
@@ -293,7 +305,7 @@ pub(crate) async fn order_line(
 }
 /// The order lines among `ids` the copy knows in the company, from any event.
 pub(crate) async fn known(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     ids: &[i64],

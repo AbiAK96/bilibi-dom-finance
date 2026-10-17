@@ -110,7 +110,7 @@ pub(crate) async fn raw(
     .get(0))
 }
 pub(crate) async fn settings(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
 ) -> DbResult<Option<(i64, Settings)>> {
@@ -142,7 +142,7 @@ pub(crate) fn settings_json(s: &Settings) -> Value {
         "price_tolerance_kind":s.price_tolerance.as_ref().map(|t|t.kind),"price_tolerance":s.price_tolerance.as_ref().map(|t|t.value)})
 }
 pub(crate) async fn taxes(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
 ) -> DbResult<Vec<TaxCode>> {
@@ -174,7 +174,22 @@ fn amount(r: &Value, k: &str) -> DbResult<Money> {
     money(d)
 }
 pub(crate) async fn document(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
+    tenant: i64,
+    company: i64,
+    id: i64,
+) -> DbResult<Option<Document>> {
+    let Some(mut document) = document_record(c, tenant, company, id).await? else {
+        return Ok(None);
+    };
+    document.debit_note_ids = c.query("SELECT id FROM finance_payables_documents WHERE tenant_id=$1 AND company_id=$2 AND corrects_document_id=$3 ORDER BY id",&[&tenant,&company,&id]).await?.iter().map(|r|r.get(0)).collect();
+    document.match_events = match_events(c, tenant, company, id, false).await?;
+    Ok(Some(document))
+}
+// The immutable record has at most 500 lines and 500 tax groups. Corrections
+// are a separate collection, paged by document.list in the agent contract.
+pub(crate) async fn document_record(
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     id: i64,
@@ -189,7 +204,6 @@ pub(crate) async fn document(
     for r in c.query("SELECT id,line_number,tax_code_id,tax_code,rate,account_id,taxable_amount,tax_amount FROM finance_payables_document_tax_lines WHERE tenant_id=$1 AND company_id=$2 AND document_id=$3 ORDER BY line_number",&[&tenant,&company,&id]).await? {
         tax_lines.push(TaxLine {id:r.get(0),line_number:r.get(1),tax_code_id:r.get(2),tax_code:r.get(3),rate:r.get(4),account_id:r.get(5),taxable_amount:money(r.get(6))?,tax_amount:money(r.get(7))?});
     }
-    let debit_note_ids=c.query("SELECT id FROM finance_payables_documents WHERE tenant_id=$1 AND company_id=$2 AND corrects_document_id=$3 ORDER BY id",&[&tenant,&company,&id]).await?.iter().map(|r|r.get(0)).collect();
     let status = text(&v, "status")?;
     let kind = text(&v, "document_type")?;
     let outstanding = if kind == "bill" && status == "posted" {
@@ -238,10 +252,10 @@ pub(crate) async fn document(
         entry_number: opt_int(&v, "entry_number"),
         lines,
         tax_lines,
-        debit_note_ids,
+        debit_note_ids: Vec::new(),
         outstanding,
         match_status: None,
-        match_events: match_events(c, tenant, company, id).await?,
+        match_events: match_events(c, tenant, company, id, true).await?,
     })
     .map(|mut d| {
         d.match_status = matching::status(&d);
@@ -252,13 +266,16 @@ pub(crate) async fn document(
 /// A document's match events oldest first, with their lines in line order
 /// and each line's exceptions in recording order.
 async fn match_events(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     document: i64,
+    current_only: bool,
 ) -> DbResult<Vec<MatchEvent>> {
     let mut events = Vec::new();
-    for r in c.query("SELECT id,event,reason,held_event_id,actor_user_id,actor_impersonator_id,to_char(occurred_at,'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM finance_payables_match_events WHERE tenant_id=$1 AND company_id=$2 AND document_id=$3 ORDER BY id",&[&tenant,&company,&document]).await? {
+    // A review only needs the latest event and the hold it approves, never
+    // the growing history. Both rows are bounded by the document's 500 lines.
+    for r in c.query("WITH latest AS (SELECT id,held_event_id FROM finance_payables_match_events WHERE tenant_id=$1 AND company_id=$2 AND document_id=$3 ORDER BY id DESC LIMIT 1) SELECT id,event,reason,held_event_id,actor_user_id,actor_impersonator_id,to_char(occurred_at,'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM finance_payables_match_events WHERE tenant_id=$1 AND company_id=$2 AND document_id=$3 AND (NOT $4 OR id IN (SELECT id FROM latest UNION SELECT held_event_id FROM latest)) ORDER BY id",&[&tenant,&company,&document,&current_only]).await? {
         events.push(MatchEvent {id:r.get(0),event:r.get(1),reason:r.get(2),held_event_id:r.get(3),actor_user_id:r.get(4),actor_impersonator_id:r.get(5),occurred_at:r.get(6),lines:Vec::new()});
     }
     let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
@@ -313,7 +330,7 @@ pub(crate) async fn record_match(
 /// With only documents in NP1, debit notes are the reductions. NP3 extends
 /// this date-window minimum with allocations and reversal events.
 pub(crate) async fn outstanding(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     bill: i64,

@@ -38,7 +38,7 @@ const OPEN_ORDER_STATUSES: [&str; 4] = ["approved", "sent", "partially_received"
 /// line matched. A bill naming one order line on several lines is matched
 /// cumulatively: each counts the bill's earlier lines as already billed.
 pub(crate) async fn evaluate(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     document: &Document,
@@ -249,7 +249,7 @@ fn price_gap(line: &MatchLine) -> Decimal {
 /// posted bill lines naming it, less those of posted debit note lines, in the
 /// company. `except` leaves out the document being matched.
 pub(crate) async fn billed_quantities(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     ids: &[i64],
@@ -273,13 +273,13 @@ pub(crate) async fn billed_quantities(
 /// with what earlier posted debit notes took back fits what the bill billed.
 /// The refusal names the first line that does not.
 pub(crate) async fn within_billed(
-    c: &impl GenericClient,
+    c: &dyn OperationClient,
     tenant: i64,
     company: i64,
     bill: &Document,
     lines: &[(usize, Option<i64>, Option<Decimal>)],
     except: Option<i64>,
-) -> Result<()> {
+) -> Result<BTreeMap<i64, Decimal>> {
     let mut billed: BTreeMap<i64, Decimal> = BTreeMap::new();
     for l in &bill.lines {
         if let (Some(id), Some(q)) = (l.order_line_id, l.quantity) {
@@ -296,7 +296,7 @@ pub(crate) async fn within_billed(
         }
     }
     if taking.is_empty() {
-        return Ok(());
+        return Ok(BTreeMap::new());
     }
     let ids: Vec<i64> = billed.keys().copied().collect();
     let taken: BTreeMap<i64, Decimal> = c
@@ -308,6 +308,7 @@ pub(crate) async fn within_billed(
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
+    let mut capacity = BTreeMap::new();
     for (id, first, quantity) in taking {
         let refusal = |field, message: &str| {
             PayablesError::Invalid(vec![FieldError {
@@ -327,8 +328,12 @@ pub(crate) async fn within_billed(
                 "exceeds the quantity billed on the corrected bill",
             ));
         }
+        capacity.insert(
+            id,
+            (*on_bill - taken.get(&id).copied().unwrap_or_default()).normalize(),
+        );
     }
-    Ok(())
+    Ok(capacity)
 }
 
 /// Nil unless a bill names an order line; else what its latest match event

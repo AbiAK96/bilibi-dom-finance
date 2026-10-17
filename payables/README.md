@@ -1,6 +1,6 @@
 # Payables
 
-`finance/payables` owns a company's supplier documents. It mirrors Bilimbi.Finance.Payables settings, tax codes, bills, debit notes, document approvals, payment requests and payments, including aging, tax totals and control-account tie-out, and the three-way match. It has no pages or agent operations; the bills pages land in NP4.
+`finance/payables` owns a company's supplier documents. It mirrors Bilimbi.Finance.Payables settings, tax codes, bills, debit notes, document approvals, payment requests and payments, including aging, tax totals and control-account tie-out, and the three-way match. Reviewed agent operations expose the facade-only workflows; the bills pages land in NP4.
 
 ## Facade
 
@@ -70,6 +70,7 @@ Bilimbi's runtime `OrderSource` read Supply Chain's facades. Here Supply Chain i
 - **Recording.** Available, a bill line names only an order line the copy knows (`is not an order line of this company in the order source`).
 - **Order facts.** The `finance/payables.purchase_orders` subscriber reads `supply_chain/purchasing.order_status_changed`, `order_approved` and `order_amended` v1 (Supply Chain `purchasing/README.md`, "Order events v1"): each part carries one line generation (current or superseded) as the order stands after the operation, and its quantity, unit price, currency, order status and superseding amendment replace what the copy held for that line, keeping the line number and description a receipt brought. Delivery keeps one order's parts in order per publisher, and a receipt may arrive before the order's facts: a line with no order facts yet matches as `order_line_not_found`. An empty part (an empty draft cancelled) changes nothing.
 - **Delivery.** Base events delivers as the `domain-events` system principal: a tenant administrator grants it `events.delivery.deliver` (`Grants::set_system`) or deliveries wait, and `Events::replay` hands a newly mounted Payables the events recorded before it.
+- **Synchronization.** Both subscribers lock the tenant's company row before reading or changing the copy, through the delivery transaction. This keeps matching facts stable throughout a reviewed Payables write without changing the system principal's authorization or refusing delivery to an archived company.
 
 ## Proof
 
@@ -87,4 +88,28 @@ Run the mounted disposable database walkthrough: `DATABASE_URL=… cargo run -p 
 
 `tie_out_control_accounts` first reads `Ledger::account_totals_by_owner`, then reads the subledger at that exact posting number. It includes every historical/configured payable account, shows credits less debits, and lists other owners' postings as differences. No ledger table is read. Pass its `through_entry_number` to other report columns.
 
-The `finance/payables/payment` attachment source describes a payment request from submission onward, so pre-approval remittance evidence stays linked to its posted payment. Its attachments can be replaced or removed while submitted and become final when posted or rejected. `evidence_datasets` and authorized `evidence_page` export all seventeen owned tables, the match records and the order source copy included, through frozen field lists, ID-ordered pages of 1–500, with exact numeric text and UTC timestamps. Matching tables will be added by their owner slice. The NP3 walkthrough exercises the workflow, refusals, temporal balances, pinned reports, tie-out, evidence, attachments and database immutability.
+The `finance/payables/payment` attachment source describes a payment request from submission onward, so pre-approval remittance evidence stays linked to its posted payment. Its attachments can be replaced or removed while submitted and become final when posted or rejected. `evidence_datasets` and authorized `evidence_page` export all seventeen owned tables, the match records and the order source copy included, through frozen field lists, ID-ordered pages of 1–500, with exact numeric text and UTC timestamps. The NP3 walkthrough exercises the workflow, refusals, temporal balances, pinned reports, tie-out, evidence, attachments and database immutability.
+
+## Reviewed agent operations (H3)
+
+The `finance.payables` guide is contributed to Base Agent API. Eight reads expose settings, tax codes and document/request/payment get/list. Twelve safe writes expose settings put, tax-code create/update, bill and debit-note create, document approve/post/void and payment submit/approve/reject/reverse. Prefix each with `finance.payables.`. Authentication and single-use consent plans belong to the host; an agent cannot call a write directly. Capability keys remain those of the facade, including additional Ledger checks. See [guide.md](guide.md) for exact fields, omissions, clear flags and the workflow.
+
+Reads use stable `after_id` cursors and `page_size` 1–100, not the facade's date/request-number cursors. Document reads omit the potentially unbounded `debit_note_ids` collection; traverse `document.list` with `corrects_document_id` instead. They expose bounded `match_context` (the latest match event and its approved hold, at most two), not complete match history. Immutable document lines/tax groups and payment allocations are bounded by their recording contracts. Agent operations add no pages or assets.
+
+The private transaction-joining methods repeat company authorization and the writable-company lock, and never commit independently of the plan. Previews share facade validation and Ledger's authorized posting/approval/reversal previews. They retain normalized amounts, tax snapshots, original control accounts, dated minimum balances and approval exceptions, but allocate no business IDs or numbers. A transaction-local FIFO review fence handles the pinned host's preview-all-then-execute lifecycle: if an earlier step changes any later review, the whole plan rolls back. Separate plans are required for dependent steps. Chart/period context is intentionally conservative; unrelated chart or period edits can also require another review. No Platform changes are needed.
+
+### Real HTTP and MCP proof
+
+Use a fresh disposable PostgreSQL database and the composed app, never production. In the Platform root:
+
+```sh
+export DATABASE_URL=postgres://…/disposable_h3
+export BILIBI_AGENT_PROOF=disposable
+export BILIBI_AGENT_CREDENTIALS=/tmp/h3-credentials.json
+export APP_ORIGIN=http://localhost:3100
+cargo run -p bilibi-finance-walkthrough-fixture --bin agent-operations
+# Run bilibi-web on 3100 with the same DATABASE_URL and APP_ORIGIN.
+python3 apps/domains/finance/fixtures/walkthrough/payables-operations.py
+```
+
+The bootstrap creates real OAuth API and resource-bound PKCE MCP credentials in a new private 0600 file. The proof never prints tokens or plan codes, and SQL only observes effects. The existing facade walkthrough and H1 wire walkthrough run on separate fresh databases. No unit tests or mocks are introduced.

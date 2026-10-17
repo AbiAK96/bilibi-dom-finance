@@ -89,6 +89,7 @@ use bilibi_module_registry::{Layer, Module, Service};
 use bilibi_tenancy::Scope;
 use jiff::{civil::Date, Timestamp};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
@@ -1240,29 +1241,8 @@ impl Ledger {
         options: &PostOptions,
     ) -> Result<serde_json::Value> {
         preview_lock(client, scope, company_id).await?;
-        if options
-            .owner
-            .as_ref()
-            .is_some_and(|o| !entries::owner_valid(o))
-            || options.settlement_account_ids.iter().any(|id| *id < 1)
-        {
-            return Err(LedgerError::InvalidOption);
-        }
         let tenant = scope.tenant();
-        let book = books::find(client, tenant, company_id)
-            .await?
-            .ok_or(LedgerError::BookNotOpen)?;
-        let valid = entries::validate(
-            client,
-            tenant,
-            company_id,
-            book.minor_units,
-            new,
-            options.owner.as_ref(),
-            entries::Inactive::Listed(&options.settlement_account_ids),
-        )
-        .await?
-        .map_err(LedgerError::Invalid)?;
+        let (book, valid) = prepare_post(client, tenant, company_id, new, options).await?;
         let calendar = periods::state(client, tenant, company_id).await?;
         let period = calendar
             .periods()
@@ -1322,29 +1302,8 @@ impl Ledger {
         options: &PostOptions,
     ) -> Result<Entry> {
         join(tx, scope, company_id, POST_ENTRIES).await?;
-        if options
-            .owner
-            .as_ref()
-            .is_some_and(|owner| !entries::owner_valid(owner))
-            || options.settlement_account_ids.iter().any(|id| *id < 1)
-        {
-            return Err(LedgerError::InvalidOption);
-        }
         let tenant = scope.tenant();
-        let book = books::find(tx.sql(), tenant, company_id)
-            .await?
-            .ok_or(LedgerError::BookNotOpen)?;
-        let valid = entries::validate(
-            tx.sql(),
-            tenant,
-            company_id,
-            book.minor_units,
-            new,
-            options.owner.as_ref(),
-            entries::Inactive::Listed(&options.settlement_account_ids),
-        )
-        .await?
-        .map_err(LedgerError::Invalid)?;
+        let (book, valid) = prepare_post(tx.sql(), tenant, company_id, new, options).await?;
         let actor = scope.user();
         let impersonator = scope.impersonator().map(|operator| operator.user());
         let entry = tx
@@ -1366,6 +1325,24 @@ impl Ledger {
             })
             .await?;
         Ok(entry)
+    }
+
+    /// Decides an approval without recording its exception. The exception includes
+    /// its normalized reason and separation-change basis, not just its presence.
+    pub async fn preview_approval_on(
+        &self,
+        client: &dyn bilibi_agent_api::OperationClient,
+        scope: &Scope,
+        company_id: i64,
+        approval: &Approval,
+    ) -> Result<Value> {
+        agent_operations::authorize_on(client, scope, company_id, VIEW).await?;
+        let exception =
+            duties::decide(client, scope.tenant(), company_id, people(scope), approval).await?;
+        Ok(json!({
+            "approval_exception": exception,
+            "duty_separation": separation_view(client, scope.tenant(), company_id).await?,
+        }))
     }
 
     /// One posted entry with its lines (`finance.ledger.view`), or
@@ -3102,6 +3079,39 @@ async fn reverse(
         })
         .await?;
     Ok(entry)
+}
+
+/// Shared posting preparation for execution and owner previews; never inserts.
+async fn prepare_post(
+    client: &dyn bilibi_agent_api::OperationClient,
+    tenant: i64,
+    company_id: i64,
+    new: &NewEntry,
+    options: &PostOptions,
+) -> Result<(Book, entries::ValidEntry)> {
+    if options
+        .owner
+        .as_ref()
+        .is_some_and(|owner| !entries::owner_valid(owner))
+        || options.settlement_account_ids.iter().any(|id| *id < 1)
+    {
+        return Err(LedgerError::InvalidOption);
+    }
+    let book = books::find(client, tenant, company_id)
+        .await?
+        .ok_or(LedgerError::BookNotOpen)?;
+    let valid = entries::validate(
+        client,
+        tenant,
+        company_id,
+        book.minor_units,
+        new,
+        options.owner.as_ref(),
+        entries::Inactive::Listed(&options.settlement_account_ids),
+    )
+    .await?
+    .map_err(LedgerError::Invalid)?;
+    Ok((book, valid))
 }
 
 async fn prepare_reverse(

@@ -3,6 +3,7 @@
 //! status, and corrections are debit notes. A bill naming order lines is
 //! matched against Payables' own copy of the order source, kept from domain
 //! events (`orders`). SQL and validation remain private.
+mod agent_operations;
 mod contributions;
 mod documents;
 mod payments;
@@ -23,6 +24,7 @@ mod settings;
 mod source;
 mod store;
 
+use bilibi_agent_api::OperationClient;
 use bilibi_company::organisation;
 use bilibi_database::{Db, Error, MutationTransaction};
 use bilibi_finance_ledger::{FieldError, Ledger, LedgerError, Money};
@@ -46,17 +48,17 @@ pub const DOCUMENT_SOURCE: &str = "finance/payables/document";
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Domains,
-    dependencies: &["base/authz", "base/database", "base/events", "base/tenancy", "core/company", "finance/attachments", "finance/ledger"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/events", "base/party_ids", "base/tenancy", "core/company", "finance/attachments", "finance/ledger"],
     migrations: &[
         ("finance-payables-001-documents", include_str!("../migrations/001-documents.sql")),
         ("finance-payables-002-payments", include_str!("../migrations/002-payments.sql")),
         ("finance-payables-003-matching", include_str!("../migrations/003-matching.sql")),
     ],
-    services: &[Service { id: SERVICE, factory: |s| Ok(Arc::new(Payables {
+    services: &[Service { id: SERVICE, factory: |s| { let payables = Arc::new(Payables {
         db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
         ledger: s.get(bilibi_finance_ledger::SERVICE)?,
         order_source: orders::available(&*s.get::<bilibi_events::Events>(bilibi_events::SERVICE)?),
-    })) }],
+    }); agent_operations::bind(payables.clone(), s.get("base/tenancy.parties")?)?; Ok(payables) } }],
 } }
 
 pub type Result<T> = std::result::Result<T, PayablesError>;
@@ -172,7 +174,7 @@ pub struct HistoryPage {
     pub next_after: Option<i64>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Party {
     pub key: String,
     pub name: String,
@@ -206,7 +208,7 @@ pub struct TaxAmountInput {
     pub tax_code_id: i64,
     pub tax_amount: Money,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DocumentLine {
     pub id: i64,
     pub line_number: i32,
@@ -218,7 +220,7 @@ pub struct DocumentLine {
     pub order_line_id: Option<i64>,
     pub quantity: Option<Decimal>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TaxLine {
     pub id: i64,
     pub line_number: i32,
@@ -229,7 +231,7 @@ pub struct TaxLine {
     pub taxable_amount: Money,
     pub tax_amount: Money,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Document {
     pub id: i64,
     pub document_type: String,
@@ -238,7 +240,9 @@ pub struct Document {
     pub corrects_document_id: Option<i64>,
     pub party: Party,
     pub party_document_number: Option<String>,
+    #[serde(serialize_with = "as_text")]
     pub document_date: Date,
+    #[serde(serialize_with = "as_text")]
     pub due_date: Date,
     pub currency_code: String,
     pub description: Option<String>,
@@ -273,7 +277,7 @@ pub struct Document {
 }
 /// One append-only match record: `held`, `exception_approved` (naming the
 /// hold it approves, with a reason) or `posted`, with the database's time.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MatchEvent {
     pub id: i64,
     pub event: String,
@@ -287,7 +291,7 @@ pub struct MatchEvent {
 }
 /// The figures one match compared for one bill line. Ordered and received
 /// figures are absent when the order source could not answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MatchLine {
     pub line_number: i32,
     pub order_line_id: i64,
@@ -303,7 +307,7 @@ pub struct MatchLine {
     pub exceptions: Vec<MatchException>,
 }
 /// One of [`MATCH_EXCEPTION_CODES`] with its plain-language detail.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MatchException {
     pub code: String,
     pub detail: String,
@@ -424,4 +428,24 @@ fn refusal(e: Error) -> PayablesError {
 }
 fn invalid(field: &'static str, message: impl Into<String>) -> PayablesError {
     PayablesError::Invalid(vec![FieldError::new(field, message)])
+}
+
+fn as_text<S: serde::Serializer>(
+    date: &Date,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&date.to_string())
+}
+
+async fn join(tx: &MutationTransaction<'_>, s: &Scope, company: i64, cap: &str) -> Result<()> {
+    authorize(tx.sql(), s, company, cap).await?;
+    organisation::require_writable(tx.sql(), s, company, true)
+        .await
+        .map(|_| ())
+        .map_err(|e| match e {
+            bilibi_company::WriteError::Archived => PayablesError::CompanyArchived,
+            bilibi_company::WriteError::NotFound => PayablesError::CompanyNotFound,
+            bilibi_company::WriteError::Access(e) => refusal(e),
+            _ => PayablesError::Failed(Error::Internal),
+        })
 }
