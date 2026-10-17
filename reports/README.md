@@ -8,9 +8,19 @@ period, and the entries behind any account's figure. It stores immutable issued
 snapshots; every figure comes through `finance/ledger`'s facade, and it reads
 none of the ledger's tables.
 
-This version is the facade (slice NT1). The pages (Management reports,
-account activity, Bookkeeping, Approval exceptions) and the auditor pack
-follow in later slices, with their menu items.
+Management reports and account activity are available at `/finance/reports`
+and `/finance/reports/accounts/{account_id}` (NT2). Bookkeeping, Approval
+exceptions and the auditor pack follow in later slices.
+
+## Pages
+
+Both routes require `finance.ledger.view` and read the signed-in account's company through the facade. Reports has four addressable views (`view=overview`, `profit-and-loss`, `balance-sheet`, `cash-position`), the shared period filter (this month by default), and previous-period comparison (`compare=none` disables it except on Overview). Custom dates stay a draft until Apply range succeeds. The display policy and browser timezone decide the preset's calendar.
+
+`Pin entry cutoff` puts the displayed positive entry number in `through`; `Show latest figures` removes it. This is not an issued snapshot. Every account-amount link carries its column's dates and the displayed cutoff, including `closing=excluded` for profit and loss. Account entries show whole-window debit and credit totals and 100 dated entries at a time; `Next entries` retains the cutoff and the `(after_date, after_id)` cursor. Activity does not subscribe to postings.
+
+Reports subscribe before the mounted read. Commit notices and missed-notice refreshes invalidate unpinned figures; bursts coalesce, and pinned figures ignore them. Custom-range drafts and table arrangement survive a posting refresh. The relay task stops with the page. If the relay cannot start, a visible warning explains periodic-refresh fallback. As in Bilimbi, zero is not a positive URL cutoff, so an empty ledger cannot be pinned.
+
+All tables use shared FlexTable and built-in ListColumns on ListState. There is no new sort/filter/page-size control: Bilimbi fixes statement order and pages activity by cursor. Section headings, subtotals and footers remain ordered rows with the reference IDs; FlexTable's uniform body replaces Bilimbi's grouped statement table. A shared SectionHeading places the statement label above the card, clear of the customization notch. The shared pin button raises a read-only page event because the Platform button has no patch-link variant. No domain CSS, JavaScript or new write path is added. Auditor-pack controls belong to NT4 and are not shown yet.
 
 ## Management reports, not statutory statements
 
@@ -159,3 +169,5 @@ Company 001's sections, reads every report with comparatives, follows a figure
 to its entries, reproduces a report from its pin after a later post its
 subscription hears, issues and reads back snapshots, and shows the facade's
 and the database's refusals.
+
+From the Platform root, with `DATABASE_URL` naming a disposable PostgreSQL 18 database, `cargo run -p bilibi-finance-walkthrough-fixture --bin reports-ui` exercises the mounted page contracts and prepares the browser fixture. It proves subscribe-before-read, a stale-click pin, pinned and unpinned notices, range draft/error retention, table compactness, four views, comparison off, unopened and forbidden ledgers, and account cursors at 99/100/101 entries with stable whole-window totals. Sign in as `manager@example.test` with the walkthrough password `bilibi-dev`, then open `/finance/reports`; running the same command with `-- post` commits a real later posting to demonstrate live refresh and pinned figures. These are executable fixture proofs, not unit tests or production seeds.
