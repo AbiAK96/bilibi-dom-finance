@@ -16,8 +16,9 @@ Bilibi checkout; it does not build on its own.
 | [`receivables/`](receivables/README.md) | `finance/receivables` | setup, series, tax codes and customers; invoice/credit-note drafts and numbered issuance with frozen party and owned posting; fully allocated receipts and owned reversals; dated/pinned aging, tax and received-tax totals, control-account tie-out, attachment sources and eleven evidence datasets. Like Bilimbi this module has no pages. |
 | [`fixed_assets/`](fixed_assets/README.md) | `finance/fixed_assets` | immutable category revisions, acquisition from posted bill or entry debit lines, frozen assumptions and straight-line/reducing-balance schedules with full first-month and month-end recognition. Runs/corrections and pages follow in NX2/NX3. |
 | [`reports/`](reports/README.md) | `finance/reports` | a company's management reports read through the ledger's facade: profit and loss, the balance sheet and the cash position with up to four comparative columns, the overview against the previous period, the entries behind any figure, all at one pinned entry number; the `finance.reports.sections` layout setting with its validator; the ledger's posting notices for live reports; and immutable issued snapshots. Its pages and the auditor pack follow in later versions of the module. |
+| [`reconciliation/`](reconciliation/README.md) | `finance/reconciliation` | each company's bank accounts mapped one-to-one to a ledger account, with a change log and a per-account CSV import mapping (a bank's layout is the company's data), and the bank statements imported through it: read by a small RFC 4180 reader, kept whole as a source document through `finance/attachments`, numbered, immutable, and refused a second time by file SHA-256 or by line fingerprint. The schema for matches and reconciliations is in place; their services and the pages follow. |
 
-Every other Finance module of Bilimbi (reconciliation, SST) lands beside
+Every other Finance module of Bilimbi (SST) lands beside
 the ledger as a sibling module folder, in later slices of the port.
 
 The ledger also contributes 21 agent operations through Bilibi's shared `/api/v1` and `/mcp`: seven reads and fourteen reviewed writes for books, accounts, journals, reversals and fiscal closing. The [ledger contract](ledger/README.md#agent-operations) and [agent guide](ledger/guide.md) describe their inputs and controls. There are no ledger pages in Bilimbi or this port.
@@ -112,6 +113,20 @@ archived company), and ends with the facade's and the database's refusals.
 The Payroll section proves the People-absent `unavailable` result without any entry or attempt, posting account/mapping validation and no-op histories, scope isolation, atomic owner-posting rollback, correction of explicitly historical fixture entries (including a race and a failed-date attempt), all five evidence datasets, audited rows and the database's retention/uniqueness refusals. It does not claim People-backed recognition while that publisher is absent.
 
 The separate NX1 walkthrough runs on its own fresh disposable database with `cargo run -p bilibi-finance-walkthrough-fixture --bin fixed-assets`. It proves immutable category history and frozen assumptions, bill-line and entry-line eligibility, exact schedules and month boundaries, duplicate registration races, grants/reach/archive refusals, evidence paging, audited rows and PostgreSQL guards. See the [Fixed Assets contract](fixed_assets/README.md). It creates no production data; there are no fixed-assets pages until NX3.
+
+The reconciliation section runs last, on Company 001. It adds bank accounts (refused for a liability account, an
+unknown or inactive account, a counter account of the wrong type, a window of
+91 and twelve kinds of unreadable import mapping; changed with a reason and
+read back from the change log) and imports statements in four bank layouts
+(a signed amount with a running balance, written newest first; debit and credit
+columns with semicolons, decimal commas and two header rows; columns by
+position with no header row; month names with `CR` and `DR` markers), refusing
+a file twice, an overlapping export naming the lines it repeats, unreadable
+rows, missing headers, a running balance that does not follow, stray and open
+quotes, a file that is not UTF-8 or is too large, a viewer, another tenant and
+a deactivated account; it reads the kept file back from Attachments, races two
+sessions importing one file, imports a 10,000 line statement, and ends with the
+database's own statement, match and reconciliation refusals.
 
 ## Naming
 
