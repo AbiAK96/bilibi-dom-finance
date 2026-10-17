@@ -21,6 +21,7 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 bilibi_finance_walkthrough_fixture::walkthrough_ledger_roles!();
 bilibi_finance_walkthrough_fixture::walkthrough_attachments_roles!();
+bilibi_finance_walkthrough_fixture::walkthrough_payables_roles!();
 bilibi_finance_walkthrough_fixture::walkthrough_einvoice_roles!();
 bilibi_finance_walkthrough_fixture::walkthrough_payroll_roles!();
 bilibi_finance_walkthrough_fixture::walkthrough_receivables_roles!();
@@ -1105,6 +1106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(0);
     println!("audit mutations recorded for finance.ledger.*: {audited}");
     bilibi_finance_walkthrough_fixture::attachments::run(&db, &services).await?;
+    bilibi_finance_walkthrough_fixture::payables::run(&db, &services).await?;
     bilibi_finance_walkthrough_fixture::periods::run(&db, &services).await?;
     bilibi_finance_walkthrough_fixture::controls::run(&db, &services).await?;
     bilibi_finance_walkthrough_fixture::totals::run(&db, &services).await?;
