@@ -45,6 +45,8 @@ struct RegisterLink;
 #[template(path = "assumptions.html")]
 struct AssumptionsView<'a> {
     detail: &'a AssetDetail,
+    cost: String,
+    residual: String,
     method: &'static str,
     heading: String,
     actor: String,
@@ -100,7 +102,12 @@ impl Detail {
             flash: None,
         })
     }
-    async fn form(&self, s: &Scope, op: &str) -> Result<Html> {
+    async fn form(
+        &self,
+        s: &Scope,
+        op: &str,
+        accounts: &[(i64, String, String, bool)],
+    ) -> Result<Html> {
         let (d, cap, title, reason) = match op {
             "dispose" => (
                 &self.dispose,
@@ -163,10 +170,20 @@ impl Detail {
                 ),
                 d.field(
                     "settlement_account_id",
-                    "Proceeds account ID (for a sale)",
-                    InputKind::Number,
+                    "Proceeds account (for a sale)",
+                    InputKind::Select,
                     false,
                     &prefix,
+                )
+                .options(
+                    std::iter::once(bilibi_ui::Choice::new("Choose an account", ""))
+                        .chain(
+                            accounts
+                                .iter()
+                                .filter(|a| a.3 && a.2 == "asset")
+                                .map(|a| bilibi_ui::Choice::new(&a.1, a.0.to_string())),
+                        )
+                        .collect(),
                 ),
             ]);
         }
@@ -184,6 +201,7 @@ impl Detail {
         })
     }
     async fn body(&self, s: &Scope) -> Result<String> {
+        let (units, accounts) = self.pages.account_context(s).await?;
         let display = self.pages.display(s).await?;
         let read = match company(s) {
             Some(c) => self.pages.assets.get_asset(s, c, self.asset_id).await,
@@ -203,6 +221,8 @@ impl Detail {
         if let Some(d) = &detail {
             assumptions = render(AssumptionsView {
                 detail: d,
+                cost: d.asset.cost.display(units),
+                residual: d.asset.residual_value.display(units),
                 heading: format!("#{} {}", d.asset.asset_number, d.asset.description),
                 method: input::method(d.asset.assumptions.method),
                 actor: actor(
@@ -219,9 +239,9 @@ impl Detail {
                 .map(|r| {
                     FlexRow::new(r.period.to_string())
                         .cell("month", Cell::text(r.period.to_string()))
-                        .cell("amount", Cell::text(r.amount.to_string()))
-                        .cell("accumulated", Cell::text(r.accumulated.to_string()))
-                        .cell("carrying", Cell::text(r.carrying_value.to_string()))
+                        .cell("amount", Cell::text(r.amount.display(units)))
+                        .cell("accumulated", Cell::text(r.accumulated.display(units)))
+                        .cell("carrying", Cell::text(r.carrying_value.display(units)))
                 })
                 .collect();
             schedule = table(
@@ -252,7 +272,7 @@ impl Detail {
                     FlexRow::new(r.run_id.to_string())
                         .cell("run", Cell::text(r.run_id.to_string()))
                         .cell("month", Cell::text(r.period.to_string()))
-                        .cell("amount", Cell::text(r.amount.to_string()))
+                        .cell("amount", Cell::text(r.amount.display(units)))
                         .cell(
                             "entry",
                             Cell::text(
@@ -304,7 +324,7 @@ impl Detail {
             )?;
         }
         let visible = detail.is_some();
-        View {register_link:render(RegisterLink)?,detail:detail.as_ref(),unavailable,flash:flash_map(&self.flash),assumptions,schedule,charges,events,dispose:if visible {self.form(s,"dispose").await?}else{Html::EMPTY},void:if detail.as_ref().is_some_and(|d|!d.voided){self.form(s,"void").await?}else{Html::EMPTY},reverse:if visible{self.form(s,"reverse").await?}else{Html::EMPTY},confirm:if self.pending_void.is_some(){render(ConfirmDialog {id:"asset-void-confirm",consequence:"Void acquisition",detail:"Depreciation already posted for this asset is reversed; other assets keep theirs. This cannot be undone.",confirm:"Void acquisition",working:"Recording…",confirm_event:"confirm_void",cancel_event:"cancel_void"})?}else{Html::EMPTY}}.render().map_err(|_|Error::Internal)
+        View {register_link:render(RegisterLink)?,detail:detail.as_ref(),unavailable,flash:flash_map(&self.flash),assumptions,schedule,charges,events,dispose:if visible {self.form(s,"dispose",&accounts).await?}else{Html::EMPTY},void:if detail.as_ref().is_some_and(|d|!d.voided){self.form(s,"void",&accounts).await?}else{Html::EMPTY},reverse:if visible{self.form(s,"reverse",&accounts).await?}else{Html::EMPTY},confirm:if self.pending_void.is_some(){render(ConfirmDialog {id:"asset-void-confirm",consequence:"Void acquisition",detail:"Depreciation already posted for this asset is reversed; other assets keep theirs. This cannot be undone.",confirm:"Void acquisition",working:"Recording…",confirm_event:"confirm_void",cancel_event:"cancel_void"})?}else{Html::EMPTY}}.render().map_err(|_|Error::Internal)
     }
     async fn perform(&self, s: &Scope, op: &str, d: &Draft) -> crate::Result<()> {
         let c = company(s).ok_or(FixedAssetsError::CompanyNotFound)?;

@@ -2,6 +2,7 @@
 use super::{render, Flash};
 use bilibi_database::{Error, Result};
 use bilibi_datetime::{DisplayContext, Format, Precision};
+use bilibi_finance_ledger::{MinorUnits, Money};
 use bilibi_ui::{
     error_sentence, Badge, BadgeKind, BuiltinColumn, ErrorSummary, Fact, FlashGroup, FlexRow,
     FlexTable, Html, ListColumns, Modal, ModalWidth, Page, PageVariant,
@@ -364,43 +365,30 @@ pub(super) fn commit_status(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Figures {
     pub currency: String,
-    scale: Option<u32>,
+    units: Option<MinorUnits>,
 }
 
 impl Figures {
     pub(super) fn book(currency: &str, minor_units: u32) -> Self {
         Self {
             currency: currency.into(),
-            scale: Some(minor_units),
+            units: MinorUnits::new(i64::from(minor_units)),
         }
     }
 
-    pub(super) fn decimal(&self, mut value: Decimal) -> String {
-        match self.scale {
-            Some(scale) => value.rescale(scale),
-            None => {
-                value = value.normalize();
-                if value.scale() < 2 {
-                    value.rescale(2);
-                }
-            }
-        }
-        value.to_string()
+    pub(super) fn decimal(&self, value: Decimal) -> String {
+        Money::display_decimal(value, self.units)
     }
 
-    pub(super) fn money(&self, value: bilibi_finance_ledger::Money) -> String {
-        self.decimal(value.amount())
+    pub(super) fn money(&self, value: Money) -> String {
+        value.display(self.units)
     }
 
-    pub(super) fn optional(&self, value: Option<bilibi_finance_ledger::Money>) -> String {
+    pub(super) fn optional(&self, value: Option<Money>) -> String {
         value.map_or_else(|| "—".into(), |m| self.money(m))
     }
 
-    pub(super) fn with_currency(
-        &self,
-        value: bilibi_finance_ledger::Money,
-        fallback: &str,
-    ) -> String {
+    pub(super) fn with_currency(&self, value: Money, fallback: &str) -> String {
         format!(
             "{} {}",
             self.money(value),
@@ -429,11 +417,7 @@ pub(super) fn buttons(buttons: Html) -> Result<Html> {
 }
 
 impl Figures {
-    pub(super) fn with_currency_opt(
-        &self,
-        value: Option<bilibi_finance_ledger::Money>,
-        fallback: &str,
-    ) -> String {
+    pub(super) fn with_currency_opt(&self, value: Option<Money>, fallback: &str) -> String {
         value.map_or_else(|| "—".into(), |m| self.with_currency(m, fallback))
     }
 }

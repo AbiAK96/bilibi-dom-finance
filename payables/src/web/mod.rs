@@ -363,3 +363,70 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
         reason: "Approving match exceptions writes through the Payables facade: there is no match-override contract yet.",
     },
 }) }
+
+impl Pages {
+    /// The book's minor units, or none when the person may not read the book
+    /// or it cannot be read: a page then shows amounts as stored.
+    async fn units(&self, scope: &Scope) -> Option<bilibi_finance_ledger::MinorUnits> {
+        let company = scope.actor().organisation()?.get();
+        let book = self
+            .contracts
+            .read(
+                scope,
+                "finance.ledger.book.get",
+                &serde_json::json!({"company_id":company}),
+            )
+            .await
+            .ok()?;
+        book["result"]["book"]["minor_units"]
+            .as_i64()
+            .and_then(bilibi_finance_ledger::MinorUnits::new)
+    }
+
+    /// The book's minor units and chart for one render; a document viewer
+    /// need not have permission to read the chart, and then has no accounts.
+    async fn account_context(
+        &self,
+        scope: &Scope,
+    ) -> Result<(
+        Option<bilibi_finance_ledger::MinorUnits>,
+        Vec<(i64, String, String)>,
+    )> {
+        let Some(company) = scope.actor().organisation().map(|c| c.get()) else {
+            return Ok((None, Vec::new()));
+        };
+        let mut input = serde_json::json!({"company_id":company});
+        let units = self.units(scope).await;
+        let mut accounts = Vec::new();
+        loop {
+            let page = match self
+                .contracts
+                .read(scope, "finance.ledger.account.list", &input)
+                .await
+            {
+                Ok(page) => page,
+                Err(
+                    bilibi_agent_api::Error::Forbidden
+                    | bilibi_agent_api::Error::Backend(Error::Forbidden | Error::Unauthorized),
+                ) => return Ok((units, Vec::new())),
+                Err(_) => return Err(Error::Internal),
+            };
+            for a in page["result"]["records"].as_array().into_iter().flatten() {
+                if let (Some(id), Some(code), Some(name), Some(kind)) = (
+                    a["id"].as_i64(),
+                    a["code"].as_str(),
+                    a["name"].as_str(),
+                    a["account_type"].as_str(),
+                ) {
+                    accounts.push((id, format!("{code} {name}"), kind.to_owned()));
+                }
+            }
+            if let Some(code) = page["result"]["next_after_code"].as_str() {
+                input["after_code"] = serde_json::json!(code);
+            } else {
+                break;
+            }
+        }
+        Ok((units, accounts))
+    }
+}

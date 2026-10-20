@@ -356,6 +356,7 @@ impl PaymentForm {
         let details = vec![
             field("date", "date", "Payment date", &d.date)
                 .kind(InputKind::Date)
+                .hint("Use the date order shown in the box. Dates are saved as YYYY-MM-DD.")
                 .required(),
             field("party", "party", "Supplier", &d.party)
                 .kind(InputKind::Select)
@@ -369,7 +370,7 @@ impl PaymentForm {
                                     "{} · {} ({} {})",
                                     p.party_key,
                                     p.party_name,
-                                    f::money(p.total, units),
+                                    p.total.display(units),
                                     self.currency
                                 ),
                                 p.party_key.clone(),
@@ -412,7 +413,7 @@ impl PaymentForm {
                         .then(|| format!("{} days overdue", doc.days_overdue)),
                     owed: format!(
                         "Owed {} {}",
-                        f::money(doc.outstanding, units),
+                        doc.outstanding.display(units),
                         doc.currency_code
                     ),
                     amount: Field::in_form(PREFIX, &format!("amount_{}", doc.id))
@@ -435,7 +436,7 @@ impl PaymentForm {
                         } else {
                             "Total so far"
                         },
-                        &format!("{} {}", f::money(total, units), self.currency),
+                        &format!("{} {}", total.display(units), self.currency),
                     )],
                 })?)
             }

@@ -593,7 +593,7 @@ impl BillForm {
                         "Still owed",
                         &b.outstanding.map_or_else(
                             || "—".into(),
-                            |m| format!("{} {}", f::money(m, units), b.currency_code),
+                            |m| format!("{} {}", m.display(units), b.currency_code),
                         ),
                     ),
                 ],
@@ -613,10 +613,11 @@ impl BillForm {
             ),
             field("date", "date", "Date", &d.date)
                 .kind(InputKind::Date)
+                .hint("Use the date order shown in the box. Dates are saved as YYYY-MM-DD.")
                 .required(),
             field("due", "due", "Due date", &d.due)
                 .kind(InputKind::Date)
-                .hint("Left empty, it is the date."),
+                .hint("Left empty, it is the date. Use the date order shown in the box. Dates are saved as YYYY-MM-DD."),
             field("description", "description", "Description", &d.description),
         ];
         if !self.note {
@@ -697,7 +698,7 @@ impl BillForm {
         };
         let totals = match self.totals() {
             Some((net, tax, total, complete)) => {
-                let shown = |m: Money| format!("{} {}", f::money(m, units), self.currency);
+                let shown = |m: Money| format!("{} {}", m.display(units), self.currency);
                 Some(render(Facts {
                     id: "payables-record-totals",
                     items: vec![

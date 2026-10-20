@@ -3,7 +3,7 @@ use crate::{Document, MatchEvent, PayablesError, Tolerance, ToleranceKind};
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_datetime::{DisplayContext, Format, Precision};
-use bilibi_finance_ledger::{LedgerError, MinorUnits, Money};
+use bilibi_finance_ledger::LedgerError;
 use bilibi_ui::{Badge, BadgeKind, Html};
 use rust_decimal::Decimal;
 
@@ -140,7 +140,7 @@ pub(super) fn refusal(action: &str, error: PayablesError) -> String {
     };
     match (action, &error) {
         ("approve", NotDraft) => "Only a draft can be approved.".into(),
-        ("approve", Ledger(LedgerError::SamePerson)) => "This company separates duties: someone other than whoever recorded the document must approve it.".into(),
+        ("approve", Ledger(LedgerError::SamePerson)) => "Someone else must approve this because the company requires separation of duties. For a one-person company, change Separation of duties on Approval exceptions.".into(),
         ("approve", Unauthorized) => "You do not have permission to approve documents.".into(),
         ("post", NotApproved) => "Only an approved or held document can be posted.".into(),
         ("post", Unauthorized) => "You do not have permission to post documents.".into(),
@@ -152,7 +152,7 @@ pub(super) fn refusal(action: &str, error: PayablesError) -> String {
         ("approve_exception", NotHeld) => "Only a held bill has exceptions to approve.".into(),
         ("approve_exception", AlreadyApproved) => "These exceptions are already approved.".into(),
         ("approve_exception", StaleHold) => "The bill was matched again since this page loaded. Review the new figures and approve again.".into(),
-        ("approve_exception", Ledger(LedgerError::SamePerson)) => "This company separates duties: someone other than whoever recorded the bill or tried to post it must approve its exceptions.".into(),
+        ("approve_exception", Ledger(LedgerError::SamePerson)) => "Someone else must approve these exceptions because the company requires separation of duties. For a one-person company, change Separation of duties on Approval exceptions.".into(),
         ("approve_exception", Unauthorized) => "You do not have permission to approve match exceptions.".into(),
         ("void", NotVoidable) => "Only a draft, approved, or held document can be voided.".into(),
         ("void", Unauthorized) => "You do not have permission to void documents.".into(),
@@ -171,31 +171,6 @@ pub(super) fn refusal(action: &str, error: PayablesError) -> String {
             }
         }
     }
-}
-
-/// Digits in threes: `1234567.50` reads `1,234,567.50`. The text already
-/// carries the book's decimal places (`Money::shown`).
-pub(super) fn grouped(amount: &str) -> String {
-    let (sign, digits) = amount
-        .strip_prefix('-')
-        .map_or(("", amount), |rest| ("-", rest));
-    let (whole, fraction) = digits.split_once('.').map_or((digits, ""), |(w, f)| (w, f));
-    let mut out = String::with_capacity(amount.len() + whole.len() / 3);
-    for (i, c) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if fraction.is_empty() {
-        format!("{sign}{out}")
-    } else {
-        format!("{sign}{out}.{fraction}")
-    }
-}
-/// An amount of the book, with its decimal places and digit groups.
-pub(super) fn money(amount: Money, units: MinorUnits) -> String {
-    grouped(&amount.shown(units))
 }
 
 pub(super) fn request_status(status: &str) -> Result<Html> {
@@ -245,9 +220,6 @@ pub(super) fn refused(
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(" ");
-    if message.contains("cannot approve it") {
-        return "This company separates duties: someone other than whoever recorded it must approve it.".into();
-    }
     if message.is_empty() {
         return format!("{action} did not go through. Try again.");
     }

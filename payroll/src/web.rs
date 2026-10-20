@@ -492,7 +492,8 @@ impl State {
                     "Entry date (company's today unless given)",
                     &self.reversal,
                 )
-                .kind(InputKind::Date);
+                .kind(InputKind::Date)
+                .hint("Use the date order shown in the box. Dates are saved as YYYY-MM-DD.");
             let form = render(FormView {
                 id: "payroll-reversal-form",
                 change: "change_reversal",
@@ -1009,10 +1010,10 @@ fn reversal(values: &HashMap<String, String>) -> crate::Result<Reversal> {
 fn account_label(accounts: &[Account], id: Option<i64>) -> String {
     match id {
         None => "—".into(),
-        Some(id) => accounts
-            .iter()
-            .find(|a| a.id == id)
-            .map_or_else(|| format!("#{id}"), |a| format!("{} {}", a.code, a.name)),
+        Some(id) => accounts.iter().find(|a| a.id == id).map_or_else(
+            || "Account unavailable".into(),
+            |a| format!("{} {}", a.code, a.name),
+        ),
     }
 }
 fn account_choices(accounts: &[Account], liability: bool) -> Vec<Choice> {

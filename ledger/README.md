@@ -122,7 +122,7 @@ The ledger has pages so a person without an AI agent can do the same daily work.
 
 | Menu (Finance, under Bookkeeping) | Route | What a person does there |
 | --- | --- | --- |
-| Book | `/finance/ledger/book` | Reads the currency and decimal places. Opens the book once. Sees whether controlled bookkeeping and separation of duties are on. |
+| Book | `/finance/ledger/book` | Reads the currency and decimal places. Opens the book once, asking who approves. Sees whether controlled bookkeeping and separation of duties are on. |
 | Chart of accounts | `/finance/ledger/accounts` | Searches and filters the chart, adds an account in a dialog. |
 | (account record) | `/finance/ledger/accounts/{id}` | Edits the name and group in place, deactivates or activates the account, marks the retained earnings account, reads today's balance. |
 | Journal entries | `/finance/ledger/entries` | Lists entries oldest first, 100 at a time, by date or account. |
@@ -484,3 +484,7 @@ to the signed-in actor and any impersonator through the Platform's audit
 capture.
 
 `evidence_page_on` is the same authorized evidence contract on a caller-supplied PostgreSQL client or transaction. Use it for every page of one repeatable-read export (Reports auditor pack); the pooled `evidence_page` wrapper is a live read per page. Schema helpers remain private.
+
+Opening a book through `finance.ledger.book.open` may include `separation_required: false` and `approval_reason` for a one-person company. That choice also requires `finance.ledger.duty-separation.manage`, records the duty-separation change in the same transaction and keeps every later same-person approval in Approval exceptions. Omitting it leaves the approval control unchanged; independent approval is the default. The Book page asks who approves before opening. A same-person refusal names the control and the Approval exceptions address.
+
+`Money::display` formats a page amount with thousands separators and the book's decimal places. `Money::shown` remains plain decimal notation for editable values.

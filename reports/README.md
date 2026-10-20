@@ -14,7 +14,7 @@ exceptions are also available (NT3), alongside auditor-pack generation and downl
 
 ## Pages
 
-Both routes require `finance.ledger.view` and read the signed-in account's company through the facade. Reports has four addressable views (`view=overview`, `profit-and-loss`, `balance-sheet`, `cash-position`), the shared period filter (this month by default), and previous-period comparison (`compare=none` disables it except on Overview). Custom dates stay a draft until Apply range succeeds. The display policy and browser timezone decide the preset's calendar.
+Both routes require `finance.ledger.view` and read the signed-in account's company through the facade. Reports has four addressable views (`view=overview`, `profit-and-loss`, `balance-sheet`, `cash-position`), the shared period filter (the latest month with entries by default, see First report and layout), and previous-period comparison (`compare=none` disables it except on Overview). Custom dates stay a draft until Apply range succeeds. The display policy and browser timezone decide the preset's calendar.
 
 `Pin entry cutoff` puts the displayed positive entry number in `through`; `Show latest figures` removes it. This is not an issued snapshot. Every account-amount link carries its column's dates and the displayed cutoff, including `closing=excluded` for profit and loss. Account entries show whole-window debit and credit totals and 100 dated entries at a time; `Next entries` retains the cutoff and the `(after_date, after_id)` cursor. Activity does not subscribe to postings.
 
@@ -98,14 +98,16 @@ income less expense not yet closed into it. That line is part of equity, so
 
 The cash position lists every account its sections cover, whatever its type and
 whether or not it has postings, as debits less credits, so an overdrawn bank
-account kept as a liability counts against the total.
+account kept as a liability counts against the total. With no cash section
+configured, the accounts are the Bank reconciliation accounts (see First report
+and layout).
 
 ## Configuration
 
 Section headings and account choices are a company's own data, never code. They
 are the `finance.reports.sections` setting (Base Settings, tenant or company
 scope, editor group Reports, edited by holders of
-`finance.ledger.accounts.manage`): an ordered JSON array of sections, each with
+`finance.ledger.accounts.manage` on the Report sections page): an ordered JSON array of sections, each with
 only these keys.
 
 ```json
@@ -200,3 +202,11 @@ The Generate event reauthorizes rather than trusting a mounted flag. Success and
 Run `DATABASE_URL=… AUDITOR_PACK_PROOF_DIR=/absolute/private/task-directory cargo run -p bilibi-finance-walkthrough-fixture --bin auditor-pack` on a fresh disposable PostgreSQL 18 database. It proves a 500-row page boundary under a second session's backdated posting, checks archive membership and checksums, exact totals, source hashes, formula protection, issued evidence, missing/cross-company access, size refusal, the download adapter and revocation of every source grant against an already-mounted page. Append `-- serve` to keep the real app at `http://127.0.0.1:4324` for browser proof; use the walkthrough manager account.
 
 Report and control-page feedback clears on the shared `clear-flash` event for its current message kind. A dismissed auditor-pack success stays dismissed across tab changes and refresh; an older success timeout cannot clear a newer refusal.
+
+## First report and layout
+
+Reports opens on the latest calendar month with entries. An explicit period in the address is preserved; a book with no entries opens on this month. The initial month is read through `finance.ledger.book.get` (`latest_entry_date`).
+
+When no cash-position section is configured, cash uses exactly the ledger accounts mapped in Bank reconciliation, including an inactive bank account that still holds money. Descendant accounts are not included by that default. An explicit cash section, including one with no accounts, takes precedence. `Reconciliation::cash_account_ids` requires ledger view and returns only account identifiers, without bank details.
+
+Use **Report sections** (`/finance/reports/sections`) to arrange report headings and choose accounts. This form replaces the generic JSON editor. Its `finance.reports.sections.get` and `finance.reports.sections.set` contracts serve pages and agents. Saving requires `finance.ledger.accounts.manage`; the shared transaction retains the layout review fence, audits the setting and refuses an archived company.

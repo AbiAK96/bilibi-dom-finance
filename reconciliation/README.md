@@ -332,3 +332,7 @@ cargo run -p bilibi-finance-walkthrough-fixture --bin bilibi-finance-reconciliat
 ```
 
 Sign in as `manager@example.test` (every control), `staff@example.test` (finalise only, granted by the proof) or `viewer@example.test` (read only) with the fixture's `PASSWORD`.
+
+Cash reports may read `Reconciliation::cash_account_ids` with `finance.ledger.view`. It returns only the mapped ledger identifiers, including inactive bank accounts; bank names, import mappings and statements still require `finance.reconciliation.view`.
+
+Base Artifacts declares 2557 retention days (7 years) as the default of **Document retention days** (`artifacts.retention_days`), and `seed-production` saves only **Storage folder** (`artifacts.storage_root`), the server's private `data/artifacts` folder. The first import creates that default folder with 0700 permissions, so a fresh installation needs no storage settings edits. A folder an administrator chose is never created: if it is missing, the import is refused with a message naming the folder and the Storage folder setting. An import blocked by a cleared policy names both settings. Both refusals link to Global settings (`/system/settings`), and the Attachments pages and source-document panels word and link them the same way. Administrators can change both settings in Global settings.

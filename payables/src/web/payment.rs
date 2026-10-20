@@ -148,11 +148,6 @@ impl Request {
             .map(|r| format!("Payment request #{} to {}", r.request_number, r.party_name))
     }
 
-    fn money(&self, amount: bilibi_finance_ledger::Money) -> String {
-        self.units
-            .map_or_else(|| amount.to_string(), |u| f::money(amount, u))
-    }
-
     pub(super) async fn body(&self, scope: &Scope) -> Result<String> {
         let mut flash = NO_FLASH;
         if let Some((kind, message)) = &self.flash {
@@ -183,10 +178,10 @@ impl Request {
             .iter()
             .find(|a| a.id == r.paid_from_account_id)
             .map_or_else(
-                || format!("#{}", r.paid_from_account_id),
+                || "Account unavailable".into(),
                 |a| format!("{} {}", a.code, a.name),
             );
-        let amount = format!("{} {}", self.money(r.amount), r.currency_code);
+        let amount = format!("{} {}", r.amount.display(self.units), r.currency_code);
         let mut items = vec![
             f::fact("Supplier", &format!("{} · {}", r.party_key, r.party_name)),
             f::fact("Payment date", &r.payment_date.to_string()),
@@ -289,7 +284,7 @@ impl Request {
                         "party_number",
                         Cell::text(bill.map_or("—", |d| f::optional(&d.party_document_number))),
                     )
-                    .cell("amount", Cell::text(self.money(a.amount))),
+                    .cell("amount", Cell::text(a.amount.display(self.units))),
             );
         }
         let mut table = FlexTable::new(&self.allocations.id, self.allocations.flex_columns(), rows);
@@ -342,7 +337,10 @@ impl Request {
                     .kind(InputKind::Date)
                     .label("Reversal date")
                     .value(self.date.clone())
-                    .hint(format!("Not before {}.", r.payment_date))
+                    .hint(format!(
+                        "Not before {}. Use the date order shown in the box. Dates are saved as YYYY-MM-DD.",
+                        r.payment_date
+                    ))
                     .required(),
             );
             fields.push(

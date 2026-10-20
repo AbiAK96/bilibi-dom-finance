@@ -444,7 +444,7 @@ impl Years {
                 .label("First day")
                 .kind(InputKind::Date)
                 .value(&opening.start)
-                .hint("The first of a month. Leave it empty to start the day after the last year ends. The first year needs a date.")
+                .hint("The first of a month. Leave it empty to start the day after the last year ends. The first year needs a date. Use the date order shown in the box. Dates are saved as YYYY-MM-DD.")
                 .errors(errors("start_date")),
         )?);
         body.push(&render(
@@ -453,7 +453,7 @@ impl Years {
                 .label("Last day")
                 .kind(InputKind::Date)
                 .value(&opening.end)
-                .hint("The last day of a month. Leave it empty for twelve months.")
+                .hint("The last day of a month. Leave it empty for twelve months. Use the date order shown in the box. Dates are saved as YYYY-MM-DD.")
                 .errors(errors("end_date")),
         )?);
         let mut actions = render(Button {

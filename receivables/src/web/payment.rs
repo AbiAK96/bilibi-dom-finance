@@ -314,7 +314,7 @@ impl Payment {
                 .value(values.get("reversal_date").cloned().unwrap_or_default())
                 .required()
                 .hint(format!(
-                    "On or after {}, the date the money was received.",
+                    "On or after {}, the date the money was received. Use the date order shown in the box. Dates are saved as YYYY-MM-DD.",
                     p.payment_date
                 ))
                 .errors(errors.of("reversal_date")),

@@ -26,6 +26,26 @@ const ENTRY_COLUMNS: &str = "id,entry_number,entry_date::text AS entry_date,desc
      posted_by_impersonator_id,to_char(posted_at,'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS posted_at";
 const LINE_COLUMNS: &str = "entry_id,line_number,account_id,debit,credit,description";
 
+/// Latest dated posting, including backdated entries but not year-end closing
+/// entries and their reversals, for the report's opening month.
+pub(crate) async fn latest_date(
+    client: &dyn OperationClient,
+    tenant: i64,
+    company: i64,
+) -> Result<Option<String>> {
+    Ok(client
+        .query_opt(
+            &format!(
+                "SELECT max(e.entry_date)::text FROM finance_ledger_entries e \
+                 WHERE e.tenant_id=$1 AND e.company_id=$2 AND ({not_closing})",
+                not_closing = periods::NOT_CLOSING
+            ),
+            &[&tenant, &company],
+        )
+        .await?
+        .and_then(|row| row.get(0)))
+}
+
 /// A new entry's values after trimming and checking, ready to insert.
 #[derive(serde::Serialize)]
 pub(crate) struct ValidEntry {
