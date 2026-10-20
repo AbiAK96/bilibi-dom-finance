@@ -6,9 +6,8 @@
 //! capability, and the dialog holds the match it unmatches, never an id the
 //! browser sends with the reason.
 use super::{
-    clear_flash, company, event_type, flash_map,
-    format::{amount, told},
-    record_id, render, Follow, Pages, DENIED,
+    clear_flash, company, event_type, flash_map, format::told, record_id, render, Follow, Pages,
+    DENIED,
 };
 use crate::{
     BankAccount, LedgerItem, Match, MatchStatus, NewMatch, PageOptions, StatementLineItem,
@@ -17,7 +16,7 @@ use crate::{
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_datetime::{Format, Precision};
-use bilibi_finance_ledger::LedgerError;
+use bilibi_finance_ledger::{LedgerError, MinorUnits, Money};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     page::*, params, BuiltinColumn, Cell, EmptyState, Field, FlashMap, FlexRow, FlexTable, Html,
@@ -472,7 +471,6 @@ impl Matching {
             .map(|html| html.as_str().to_owned());
         };
         let units = l.units;
-        let money = |m: bilibi_finance_ledger::Money| amount(m.amount(), units);
 
         let mode = self.lines_columns.mode();
         let mut rows = vec![];
@@ -498,7 +496,10 @@ impl Matching {
                     "description",
                     described(&line.description, line.reference.as_deref(), mode)?,
                 )
-                .cell("amount", Cell::text(money(line.amount)))
+                .cell(
+                    "amount",
+                    Cell::text(line.amount.display(MinorUnits::new(i64::from(units)))),
+                )
                 .slot(
                     "suggested",
                     render(Suggested {
@@ -546,7 +547,10 @@ impl Matching {
                     "description",
                     described(&entry.description, entry.reference.as_deref(), mode)?,
                 )
-                .cell("amount", Cell::text(money(entry.amount)));
+                .cell(
+                    "amount",
+                    Cell::text(entry.amount.display(MinorUnits::new(i64::from(units)))),
+                );
             row.dom_id = Some(format!("entry-{}", entry.entry_id));
             rows.push(row);
         }
@@ -579,7 +583,13 @@ impl Matching {
                             .join(", "),
                     ),
                 )
-                .cell("amount", Cell::text(amount(total, units)))
+                .cell(
+                    "amount",
+                    Cell::text(Money::display_decimal(
+                        total,
+                        MinorUnits::new(i64::from(units)),
+                    )),
+                )
                 .cell("note", Cell::text(m.note.clone().unwrap_or_default()))
                 .cell(
                     "matched",
@@ -610,7 +620,9 @@ impl Matching {
             ),
         )?;
 
-        let sum = |items: Vec<Decimal>| amount(items.into_iter().sum(), units);
+        let sum = |items: Vec<Decimal>| {
+            Money::display_decimal(items.into_iter().sum(), MinorUnits::new(i64::from(units)))
+        };
         View {
             flash: flash_map(&self.flash),
             account: &l.account,
