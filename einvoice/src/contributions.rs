@@ -56,7 +56,7 @@ macro_rules! page {
         }) }
         bilibi_menu::contribute!("finance/einvoice",
             bilibi_menu::MenuItem::page(concat!("finance.einvoice.", $operation), $label, $path)
-                .under("finance").icon($icon)
+                .under("finance.group.einvoicing").icon($icon)
                 .requires(bilibi_menu::Requirement::Capability($capability)).order($order)
         );
     };
@@ -67,7 +67,7 @@ page!(
     "E-invoice Consolidation",
     VIEW,
     "squares-2x2",
-    9
+    2
 );
 page!(
     "reconciliation",
@@ -75,7 +75,7 @@ page!(
     "E-invoice Reconciliation",
     VIEW,
     "chart-bar",
-    10
+    3
 );
 page!(
     "setup",
@@ -83,5 +83,5 @@ page!(
     "E-invoice Setup",
     SETTINGS,
     "clipboard-document-list",
-    11
+    4
 );
