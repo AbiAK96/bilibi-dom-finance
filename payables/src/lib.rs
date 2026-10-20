@@ -9,7 +9,7 @@ mod documents;
 mod payments;
 pub use payments::{
     Allocation, AllocationInput, NewPayment, Payment, PaymentDecision, PaymentQuery,
-    PaymentRequest, PaymentRequestQuery,
+    PaymentRequest, PaymentRequestPage, PaymentRequestPageQuery, PaymentRequestQuery,
 };
 mod balances;
 pub use balances::{
@@ -62,6 +62,8 @@ inventory::submit! { Module {
     }); agent_operations::bind(payables.clone(), s.get("base/tenancy.parties")?)?; Ok(payables) } }, Service { id: web::PAGES, factory: |s| Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
         db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
         payables: s.get(SERVICE)?,
+        ledger: s.get(bilibi_finance_ledger::SERVICE)?,
+        contracts: s.get(bilibi_agent_api::page::SERVICE)?,
         display: s.get("base/datetime.display")?,
         locales: s.get("base/locale.locales")?,
     })))) }],
@@ -408,8 +410,19 @@ impl Payables {
         capability: &str,
         action: &str,
     ) -> Result<MutationTransaction<'c>> {
+        self.write_all(client, scope, company, &[capability], action)
+            .await
+    }
+    async fn write_all<'c>(
+        &self,
+        client: &'c mut tokio_postgres::Client,
+        scope: &Scope,
+        company: i64,
+        capabilities: &[&str],
+        action: &str,
+    ) -> Result<MutationTransaction<'c>> {
         self.ledger
-            .write(client, scope, company, &[capability], action)
+            .write(client, scope, company, capabilities, action)
             .await
             .map_err(|e| match e {
                 LedgerError::Unauthorized => PayablesError::Unauthorized,
