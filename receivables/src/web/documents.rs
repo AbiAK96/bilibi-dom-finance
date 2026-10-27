@@ -359,7 +359,6 @@ impl Documents {
         }
         let mut body = render(Header {
             title: Html::text("Invoices"),
-            subtitle: "Invoices and credit notes: drafts, issued and discarded.",
             actions,
             ..Header::default()
         })?;
@@ -477,7 +476,7 @@ impl Documents {
                     .label(label)
                     .kind(InputKind::Date)
                     .value(value(key))
-                    .hint(format!("{hint} Use the date order shown in the box. Dates are saved as YYYY-MM-DD."))
+                    .hint(hint)
                     .errors(draft.errors.of(key)),
             )?);
         }

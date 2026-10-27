@@ -356,7 +356,6 @@ impl PaymentForm {
         let details = vec![
             field("date", "date", "Payment date", &d.date)
                 .kind(InputKind::Date)
-                .hint("Use the date order shown in the box. Dates are saved as YYYY-MM-DD.")
                 .required(),
             field("party", "party", "Supplier", &d.party)
                 .kind(InputKind::Select)
@@ -548,7 +547,7 @@ impl PaymentForm {
                 redirect: Some(to),
                 flash: Some((
                     StatusKind::Success,
-                    "Payment requested. Someone else approves it before anything is paid.".into(),
+                    "Payment requested. It will post when approved.".into(),
                 )),
                 ..LiveBody::default()
             },
