@@ -399,7 +399,20 @@ impl Payments {
             .iter()
             .map(|c| Choice::new(format!("{} {}", c.code, c.name), c.id.to_string()))
             .collect();
-        body.push(&render(
+        let series: Vec<Choice> = self
+            .series
+            .iter()
+            .filter(|s| s.kind == "payment" && s.active)
+            .map(|s| Choice::new(format!("{} ({})", s.name, s.code), s.id.to_string()))
+            .collect();
+        let deposits: Vec<Choice> = self
+            .accounts
+            .iter()
+            .filter(|a| a.active && a.account_type == "asset")
+            .map(|a| Choice::new(a.label(), a.id.to_string()))
+            .collect();
+        let mut who = Html::EMPTY;
+        who.push(&render(
             Field::in_form("receipt", "customer_id")
                 .id("receivables-receipt-customer_id")
                 .label("Customer")
@@ -408,15 +421,9 @@ impl Payments {
                 .options(customers)
                 .value(value("customer_id"))
                 .required()
-                .errors(draft.errors.of("customer_id")),
+                .errors(draft.errors.under("customer_id", "Customer")),
         )?);
-        let series: Vec<Choice> = self
-            .series
-            .iter()
-            .filter(|s| s.kind == "payment" && s.active)
-            .map(|s| Choice::new(format!("{} ({})", s.name, s.code), s.id.to_string()))
-            .collect();
-        body.push(&render(
+        who.push(&render(
             Field::in_form("receipt", "series_id")
                 .id("receivables-receipt-series_id")
                 .label("Series")
@@ -429,9 +436,11 @@ impl Payments {
                 .options(series)
                 .value(value("series_id"))
                 .required()
-                .errors(draft.errors.of("series_id")),
+                .errors(draft.errors.under("series_id", "Series")),
         )?);
-        body.push(&render(
+        body.push(&f::two(who)?);
+        let mut money = Html::EMPTY;
+        money.push(&render(
             Field::in_form("receipt", "payment_date")
                 .id("receivables-receipt-payment_date")
                 .label("Date received")
@@ -439,24 +448,20 @@ impl Payments {
                 .value(value("payment_date"))
                 .required()
                 .hint("A receipt cannot settle an invoice dated after it.")
-                .errors(draft.errors.of("payment_date")),
+                .errors(draft.errors.under("payment_date", "Date received")),
         )?);
-        body.push(&render(
+        money.push(&render(
             Field::in_form("receipt", "amount")
                 .id("receivables-receipt-amount")
                 .label("Amount received")
                 .attr("inputmode", "decimal")
                 .value(value("amount"))
                 .required()
-                .errors(draft.errors.of("amount")),
+                .errors(draft.errors.under("amount", "Amount received")),
         )?);
-        let deposits: Vec<Choice> = self
-            .accounts
-            .iter()
-            .filter(|a| a.active && a.account_type == "asset")
-            .map(|a| Choice::new(a.label(), a.id.to_string()))
-            .collect();
-        body.push(&render(
+        body.push(&f::two(money)?);
+        let mut deposit = Html::EMPTY;
+        deposit.push(&render(
             Field::in_form("receipt", "deposit_account_id")
                 .id("receivables-receipt-deposit_account_id")
                 .label("Deposited to")
@@ -465,24 +470,25 @@ impl Payments {
                 .options(deposits)
                 .value(value("deposit_account_id"))
                 .required()
-                .errors(draft.errors.of("deposit_account_id")),
+                .errors(draft.errors.under("deposit_account_id", "Deposited to")),
         )?);
-        body.push(&render(
+        deposit.push(&render(
             Field::in_form("receipt", "reference")
                 .id("receivables-receipt-reference")
                 .label("Reference")
                 .attr("maxlength", "100")
                 .hint("A cheque or transfer number, if there is one.")
                 .value(value("reference"))
-                .errors(draft.errors.of("reference")),
+                .errors(draft.errors.under("reference", "Reference")),
         )?);
+        body.push(&f::two(deposit)?);
         body.push(&render(
             Field::in_form("receipt", "description")
                 .id("receivables-receipt-description")
                 .label("Description")
                 .attr("maxlength", "500")
                 .value(value("description"))
-                .errors(draft.errors.of("description")),
+                .errors(draft.errors.under("description", "Description")),
         )?);
         body.push(&render(SectionHeading {
             title: "Apply to invoices",
@@ -527,7 +533,7 @@ impl Payments {
             id: "receivables-receipt-form",
             event: "receipt_change",
             change: true,
-            class: "",
+            class: "mt-4",
             body,
             actions: Html::EMPTY,
         })?;
@@ -539,6 +545,14 @@ impl Payments {
             ..Button::default()
         })?;
         buttons.push(&render(Button {
+            id: "receivables-receipt-cancel",
+            button_type: "button",
+            event: "cancel_record",
+            class: "ml-auto",
+            body: Html::text("Cancel"),
+            ..Button::default()
+        })?);
+        buttons.push(&render(Button {
             id: "receivables-receipt-save",
             button_type: "button",
             event: "save_receipt",
@@ -547,21 +561,14 @@ impl Payments {
             body: Html::text("Record receipt"),
             ..Button::default()
         })?);
-        buttons.push(&render(Button {
-            id: "receivables-receipt-cancel",
-            button_type: "button",
-            event: "cancel_record",
-            body: Html::text("Cancel"),
-            ..Button::default()
-        })?);
         let mut inner = form;
         inner.push(&f::buttons(buttons)?);
         f::modal(
-            "receivables-receipt",
+            "receivables-receipt-modal",
             "Record receipt",
             "Recording numbers the receipt and posts it to the ledger.",
             "cancel_record",
-            ModalWidth::Narrow,
+            ModalWidth::Wide,
             &self.flash,
             inner,
         )

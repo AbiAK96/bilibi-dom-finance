@@ -784,7 +784,7 @@ impl Settings {
                 .id(format!("receivables-{kind}-{key}"))
                 .label(label)
                 .value(value(key))
-                .errors(errors.of(key))
+                .errors(errors.under(key, label))
         };
         if kind == "series" {
             body.push(&render(
@@ -881,9 +881,9 @@ impl Settings {
                 "save_tax"
             },
             change: false,
-            class: "mt-3",
+            class: "mt-4",
             body: inner,
-            actions,
+            actions: f::actions(actions)?,
         })?;
         Ok(Some(f::modal(
             &format!("receivables-{kind}"),

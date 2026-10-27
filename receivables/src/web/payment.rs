@@ -314,7 +314,7 @@ impl Payment {
                 .value(values.get("reversal_date").cloned().unwrap_or_default())
                 .required()
                 .hint(format!("On or after {}, the receipt date.", p.payment_date))
-                .errors(errors.of("reversal_date")),
+                .errors(errors.under("reversal_date", "Reversal date")),
         )?);
         body.push(&render(
             Field::in_form("reverse", "reason")
@@ -324,33 +324,33 @@ impl Payment {
                 .attr("maxlength", "500")
                 .value(values.get("reason").cloned().unwrap_or_default())
                 .required()
-                .errors(errors.of("reason")),
+                .errors(errors.under("reason", "Reason (1 to 500 characters)")),
         )?);
         for message in errors.base() {
             body.push(&Html::text(&message));
         }
         let mut actions = render(Button {
+            id: "receivables-reverse-cancel",
+            button_type: "button",
+            event: "cancel_reverse",
+            body: Html::text("Keep receipt"),
+            ..Button::default()
+        })?;
+        actions.push(&render(Button {
             id: "receivables-reverse-confirm",
             button_type: "submit",
             variant: ButtonVariant::Danger,
             working: "Reversing…",
             body: Html::text("Reverse receipt"),
             ..Button::default()
-        })?;
-        actions.push(&render(Button {
-            id: "receivables-reverse-cancel",
-            button_type: "button",
-            event: "cancel_reverse",
-            body: Html::text("Keep receipt"),
-            ..Button::default()
         })?);
         let form = render(Form {
             id: "receivables-reverse-form",
             event: "reverse",
             change: false,
-            class: "",
+            class: "mt-4",
             body,
-            actions,
+            actions: f::actions(actions)?,
         })?;
         f::modal(
             "receivables-reverse",

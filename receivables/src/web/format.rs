@@ -188,6 +188,15 @@ impl Errors {
         self.0.get(path).cloned().unwrap_or_default()
     }
 
+    /// The messages for one input field as sentences that name it, the way
+    /// the summary reads them, for the line under the field.
+    pub(super) fn under(&self, path: &str, label: &str) -> Vec<String> {
+        self.of(path)
+            .iter()
+            .map(|message| error_sentence(label, message))
+            .collect()
+    }
+
     /// The messages that belong to no field (a refusal of the whole request).
     pub(super) fn base(&self) -> Vec<String> {
         self.of("base")
@@ -239,13 +248,13 @@ pub(super) fn frame(
     mut body: Html,
     modal: Option<Html>,
 ) -> Result<String> {
+    if let Some(modal) = modal {
+        body.push(&modal);
+    }
     let mut html = render(FlashGroup {
         id: "flash-group",
         flash: flash.map(),
     })?;
-    if let Some(modal) = modal {
-        body.push(&modal);
-    }
     html.push(&render(Page {
         id,
         variant,
@@ -256,6 +265,11 @@ pub(super) fn frame(
 }
 
 /// A form dialog over the page; it shows the page's flash itself while open.
+/// The shared dialog owns `{id}-title`, `{id}-description` and `{id}-body`,
+/// so give the dialog an id no field inside it extends that way (a
+/// `description` field in a `receivables-draft` dialog would share its id
+/// with the dialog's description, and its label would bind to the wrong
+/// element): name the dialog `<record>-modal`.
 pub(super) fn modal(
     id: &str,
     title: &str,
@@ -421,7 +435,7 @@ impl Figures {
 
 #[derive(askama::Template)]
 #[template(
-    source = r#"<div class="mt-3 flex flex-wrap items-center gap-2">{{ buttons|safe }}</div>"#,
+    source = r#"<div class="mt-4 flex w-full flex-wrap justify-end gap-2">{{ buttons|safe }}</div>"#,
     ext = "html"
 )]
 struct ButtonRow {
@@ -429,9 +443,42 @@ struct ButtonRow {
 }
 
 /// Buttons that sit under a dialog's change-tracking form: they raise their
-/// own events, so the form's values must already be on the server.
+/// own events, so the form's values must already be on the server. Cancel
+/// comes first; the primary action follows, at the end of the row.
 pub(super) fn buttons(buttons: Html) -> Result<Html> {
     render(ButtonRow { buttons })
+}
+
+#[derive(askama::Template)]
+#[template(
+    source = r#"<div class="flex w-full flex-wrap justify-end gap-2">{{ buttons|safe }}</div>"#,
+    ext = "html"
+)]
+struct ActionRow {
+    buttons: Html,
+}
+
+/// The actions of a shared `Form` in a dialog. The form's own row starts at
+/// the left, so this row fills that line and keeps Cancel, then the verb, at
+/// the end.
+pub(super) fn actions(buttons: Html) -> Result<Html> {
+    render(ActionRow { buttons })
+}
+
+#[derive(askama::Template)]
+#[template(
+    source = r#"{% import "forms.html" as forms %}{% call forms::section(labelledby=id, heading=heading) %}<div class="grid items-start gap-x-3 sm:grid-cols-2">{{ body|safe }}</div>{% endcall %}"#,
+    ext = "html"
+)]
+struct FieldGroup<'a> {
+    id: &'a str,
+    heading: &'a str,
+    body: Html,
+}
+
+/// Related fields in one bordered section, two columns from the `sm` width up.
+pub(super) fn group(id: &str, heading: &str, body: Html) -> Result<Html> {
+    render(FieldGroup { id, heading, body })
 }
 
 impl Figures {
@@ -460,7 +507,7 @@ pub(super) fn announce(record: i64) -> Result<Html> {
 
 #[derive(askama::Template)]
 #[template(
-    source = r#"<div class="grid grid-cols-2 gap-x-3 sm:grid-cols-4">{{ body|safe }}</div>"#,
+    source = r#"<div class="grid grid-cols-2 items-start gap-x-3 sm:grid-cols-4">{{ body|safe }}</div>"#,
     ext = "html"
 )]
 struct Four {
@@ -469,7 +516,7 @@ struct Four {
 
 #[derive(askama::Template)]
 #[template(
-    source = r#"<div class="grid gap-x-3 sm:grid-cols-2">{{ body|safe }}</div>"#,
+    source = r#"<div class="grid items-start gap-x-3 sm:grid-cols-2">{{ body|safe }}</div>"#,
     ext = "html"
 )]
 struct Two {

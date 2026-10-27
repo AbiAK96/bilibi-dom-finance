@@ -792,7 +792,8 @@ impl Document {
             })
             .collect();
         for (i, line) in lines.rows.iter().enumerate() {
-            let err = |key: &str| lines.errors.of(&format!("lines.{i}.{key}"));
+            let err =
+                |key: &str, label: &str| lines.errors.under(&format!("lines.{i}.{key}"), label);
             body.push(&render(SectionHeading {
                 title: &format!("Line {}", i + 1),
                 actions: render(Button {
@@ -812,7 +813,7 @@ impl Document {
                     .label("Description")
                     .attr("maxlength", "500")
                     .value(line.description.clone())
-                    .errors(err("description")),
+                    .errors(err("description", "Description")),
             )?);
             let mut row = Html::EMPTY;
             row.push(&render(
@@ -821,7 +822,7 @@ impl Document {
                     .label("Quantity")
                     .attr("inputmode", "decimal")
                     .value(line.quantity.clone())
-                    .errors(err("quantity")),
+                    .errors(err("quantity", "Quantity")),
             )?);
             row.push(&render(
                 Field::in_form("line", &format!("unit_price_{i}"))
@@ -829,7 +830,7 @@ impl Document {
                     .label("Unit price")
                     .attr("inputmode", "decimal")
                     .value(line.unit_price.clone())
-                    .errors(err("unit_price")),
+                    .errors(err("unit_price", "Unit price")),
             )?);
             row.push(&render(
                 Field::in_form("line", &format!("account_id_{i}"))
@@ -839,7 +840,7 @@ impl Document {
                     .prompt("Company default")
                     .options(accounts.clone())
                     .value(line.account_id.clone())
-                    .errors(err("account_id")),
+                    .errors(err("account_id", "Account")),
             )?);
             row.push(&render(
                 Field::in_form("line", &format!("tax_code_id_{i}"))
@@ -849,7 +850,7 @@ impl Document {
                     .prompt("No tax")
                     .options(taxes.clone())
                     .value(line.tax_code_id.clone())
-                    .errors(err("tax_code_id")),
+                    .errors(err("tax_code_id", "Tax code")),
             )?);
             body.push(&f::four(row)?);
         }
@@ -857,7 +858,7 @@ impl Document {
             id: "receivables-lines-form",
             event: "lines_change",
             change: true,
-            class: "",
+            class: "mt-4",
             body,
             actions: Html::EMPTY,
         })?;
@@ -869,19 +870,20 @@ impl Document {
             ..Button::default()
         })?;
         buttons.push(&render(Button {
+            id: "receivables-lines-cancel",
+            button_type: "button",
+            event: "cancel_lines",
+            class: "ml-auto",
+            body: Html::text("Cancel"),
+            ..Button::default()
+        })?);
+        buttons.push(&render(Button {
             id: "receivables-lines-save",
             button_type: "button",
             event: "save_lines",
             variant: ButtonVariant::Primary,
             working: "Saving…",
             body: Html::text("Save lines"),
-            ..Button::default()
-        })?);
-        buttons.push(&render(Button {
-            id: "receivables-lines-cancel",
-            button_type: "button",
-            event: "cancel_lines",
-            body: Html::text("Cancel"),
             ..Button::default()
         })?);
         let mut inner = form;
