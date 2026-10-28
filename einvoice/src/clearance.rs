@@ -492,6 +492,13 @@ impl Einvoice {
     /// characters), inside the authority's cancellation window after
     /// validation and only while no note the authority holds references it
     /// (`finance.einvoice.documents.cancel`); then records `cancelled`.
+    /// Before asking, it reads the document's status at the authority (an
+    /// earlier request's answer may have been lost): when the authority
+    /// already holds it as cancelled, that is recorded, the ledger reversal
+    /// runs, and the updated document is answered as a success without a
+    /// request; when the read cannot confirm a cancellable status, nothing is
+    /// sent and the read's own refusal is answered (`RateLimited`,
+    /// `AuthorityUnavailable` or `Authority(code)`).
     /// Refusals: `NotCancellable`, `CancellationPeriodOver`,
     /// `ActiveReferencingDocuments`, `InvalidReason`, `CancellationRefused`
     /// from the authority (recorded as `cancellation_refused`), `RateLimited`
@@ -545,6 +552,30 @@ impl Einvoice {
         let credentials = self
             .credentials(scope, company_id, &document.environment)
             .await?;
+        // An earlier cancellation request may have reached the authority even
+        // when its answer was lost. Check its status before sending another.
+        let status = self
+            .read_status(
+                scope,
+                company_id,
+                &recorded,
+                &credentials,
+                Writer::Session(CANCEL),
+            )
+            .await
+            .map_err(|outcome| match outcome {
+                Outcome::Retry("rate_limited") => EinvoiceError::RateLimited,
+                Outcome::Cancel(code) => EinvoiceError::Authority(code),
+                _ => EinvoiceError::AuthorityUnavailable,
+            })?;
+        if status == "cancelled" {
+            let mut view = self.view(scope, company_id, document_id).await?;
+            view.already_cancelled = true;
+            return Ok(view);
+        }
+        if !CANCELLABLE.contains(&status.as_str()) {
+            return Err(EinvoiceError::NotCancellable);
+        }
         let api_url = self.api_url(&document.environment).await?;
         let connection = self.connection(scope, company_id, &credentials, &api_url);
         let base = json!({
