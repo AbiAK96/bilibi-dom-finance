@@ -153,9 +153,10 @@ impl Receivables {
             .await?
             .ok_or(R::DocumentNotFound)?;
         let mut data = old.clone();
-        let customer = store::find(client, CUSTOMERS, tenant, company, Some(draft.customer_id))
+        let customer_row = store::find(client, CUSTOMERS, tenant, company, Some(draft.customer_id))
             .await?
             .ok_or(R::CustomerNotFound)?;
+        let customer = self.customer(client, scope, customer_row.clone()).await?;
         let series = store::find(client, SERIES, tenant, company, Some(draft.series_id))
             .await?
             .ok_or(R::SeriesNotFound)?;
@@ -165,8 +166,11 @@ impl Receivables {
             .ok_or_else(|| invalid("issue_date", "can't be blank"))?
             .parse()
             .map_err(|_| invalid("issue_date", "is invalid"))?;
-        if draft.kind == "invoice" && customer["active"] != true {
-            return Err(invalid("customer_id", "is inactive"));
+        if draft.kind == "invoice" {
+            if !customer.active {
+                return Err(invalid("customer_id", "is inactive"));
+            }
+            Self::invoiceable(&customer)?;
         }
         if series["active"] != true {
             return Err(invalid("series_id", "is inactive"));
@@ -227,9 +231,7 @@ impl Receivables {
                 .map_err(|p| invalid("lines", format!("tax code {} account {p}", line.tax_code)))?;
         }
         if !credit && draft.due_date.is_none() {
-            let days = customer["payment_terms_days"]
-                .as_i64()
-                .ok_or(Error::Internal)?;
+            let days = i64::from(customer.payment_terms_days);
             data["due_date"] = json!(date
                 .checked_add(jiff::SignedDuration::from_hours(days * 24))
                 .map_err(|_| invalid("due_date", "is invalid"))?
@@ -242,21 +244,22 @@ impl Receivables {
         data["receivable_account_id"] = json!(control);
         data["issued_by_user_id"] = json!(scope.user());
         data["issued_by_impersonator_id"] = json!(scope.impersonator().map(|s| s.user()));
-        for field in [
-            "name",
-            "tax_identifier",
-            "registration_identifier",
-            "email",
-            "phone",
-            "line1",
-            "line2",
-            "line3",
-            "locality",
-            "postcode",
-            "admin1_code",
-            "country_iso",
-        ] {
-            data[format!("party_{field}")] = customer[field].clone();
+        // The party frozen on the document. A linked customer's party is its
+        // company's: the name now, and the facts the commit reads from Core
+        // on its full connection (`frozen_party`); the columns it carried
+        // before linking are not copied and the billing address stays empty
+        // until Core Address offers a read for this connection
+        // (TODO(platform)). A customer recorded before linking freezes the
+        // party it carries.
+        for field in crate::companies::PARTY {
+            data[format!("party_{field}")] = if customer.company.is_some() {
+                Value::Null
+            } else {
+                customer_row[field].clone()
+            };
+        }
+        if customer.company.is_some() {
+            data["party_name"] = json!(customer.name);
         }
         let mut lines = vec![if credit {
             NewLine::credit(control, draft.total)
@@ -283,7 +286,7 @@ impl Receivables {
             description: format!(
                 "{} {reference} to {}",
                 if credit { "Credit note" } else { "Invoice" },
-                customer["name"].as_str().ok_or(Error::Internal)?
+                customer.name
             ),
             reference: Some(reference),
             lines,
@@ -299,7 +302,7 @@ impl Receivables {
             options,
             // The effective control is frozen in `after` and the posting;
             // unrelated defaults cannot change this saved draft's entry.
-            facts: json!({"draft":draft,"customer":customer,"series":series,"credited_invoice":credited}),
+            facts: json!({"draft":draft,"customer":customer,"linked_company_id":crate::companies::linked(&customer_row),"series":series,"credited_invoice":credited}),
         })
     }
 
@@ -315,9 +318,17 @@ impl Receivables {
             after: mut data,
             entry,
             options,
-            ..
+            facts,
         } = self.prepare_issue(tx.sql(), scope, company, id).await?;
         let tenant = scope.tenant();
+        // Freeze the linked company's facts on this full connection, under
+        // the issuer's own Companies view; a restricted fact refuses the issue.
+        if let Some(linked) = facts["linked_company_id"].as_i64() {
+            let party = self.frozen_party(tx.sql(), scope, linked).await?;
+            for (field, value) in party.as_object().into_iter().flatten() {
+                data[field] = value.clone();
+            }
+        }
         let entry = self
             .ledger
             .post_entry_in(tx, scope, company, &entry, &options)
@@ -418,6 +429,9 @@ impl Receivables {
         )
         .await?
         .ok_or_else(|| invalid("customer_id", "is not a customer of this company"))?;
+        // A receipt may come from any customer, linked or not, whatever its
+        // company's status; the entry names the customer as it reads now.
+        let customer = self.customer(client, scope, customer).await?;
         let series = store::find(client, SERIES, tenant, company, data["series_id"].as_i64())
             .await?
             .ok_or_else(|| invalid("series_id", "is not a series of this company"))?;
@@ -534,10 +548,7 @@ impl Receivables {
         );
         let entry = NewEntry {
             entry_date: date,
-            description: format!(
-                "Payment {reference} from {}",
-                customer["name"].as_str().ok_or(Error::Internal)?
-            ),
+            description: format!("Payment {reference} from {}", customer.name),
             reference: Some(reference.clone()),
             lines,
         };
