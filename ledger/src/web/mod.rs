@@ -192,6 +192,10 @@ menu!(
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, Provenance { module: MODULE, source: file!(), line: line!() }, &PageWrites {
     service: PAGES,
     contracts: &[
+        ("review_publication", "finance.ledger.chart_template.save"),
+        ("commit_publication", "finance.ledger.chart_template.save"),
+        ("review_publication", "finance.ledger.chart_template.propose"),
+        ("commit_publication", "finance.ledger.chart_template.propose"),
         ("review_open", "finance.ledger.book.open"),
         ("open_book", "finance.ledger.book.open"),
         ("create", "finance.ledger.account.create"),
@@ -729,7 +733,7 @@ fn field_label(path: &str) -> String {
 fn failure(error: ContractError) -> Result<Failure> {
     Ok(match error {
         ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-            return Err(error)
+            return Err(error);
         }
         ContractError::Forbidden | ContractError::Backend(Error::Forbidden) => Failure::Denied,
         ContractError::InvalidInput(fields) => Failure::Refused(Refusal {
@@ -840,7 +844,7 @@ pub(crate) fn no_company(id: &str) -> Result<Html> {
     render(
         EmptyState::missing(
             "No current company",
-            "Choose a current company in the top bar to see its ledger.",
+            "Choose a current company in the top bar, or ask an administrator for access.",
         )
         .id(id),
     )
