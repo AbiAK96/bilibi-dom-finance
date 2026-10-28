@@ -3,57 +3,73 @@ use crate::*;
 use bilibi_finance_ledger::{MinorUnits, TotalsQuery};
 use std::collections::BTreeMap;
 
-/// A report's posting fence and aging boundaries (0 = not yet due).
+/// Boundaries needed to reproduce ledger postings and entryless opening records.
+#[derive(Clone, Debug, Default)]
+pub struct BalancePins {
+    pub through_entry_number: Option<i64>,
+    pub through_opening_batch_id: Option<i64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgingQuery {
+    pub through_opening_batch_id: Option<i64>,
     pub through_entry_number: Option<i64>,
     pub bucket_days: Vec<i32>,
 }
 impl Default for AgingQuery {
     fn default() -> Self {
         Self {
+            through_opening_batch_id: None,
             through_entry_number: None,
             bucket_days: vec![30, 60, 90],
         }
     }
 }
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgedDocument {
     pub id: i64,
     pub document_number: i64,
     pub party_key: String,
     pub party_name: String,
     pub party_document_number: Option<String>,
-    #[serde(serialize_with = "date_text")]
+    #[serde(serialize_with = "date_text", deserialize_with = "read_date")]
     pub document_date: Date,
-    #[serde(serialize_with = "date_text")]
+    #[serde(serialize_with = "date_text", deserialize_with = "read_date")]
     pub due_date: Date,
     pub currency_code: String,
+    #[serde(deserialize_with = "read_money")]
     pub total: Money,
+    #[serde(deserialize_with = "read_money")]
     pub outstanding: Money,
     pub days_overdue: i32,
     pub bucket: usize,
 }
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgedParty {
     pub vendor_id: Option<i64>,
     pub party_key: String,
     pub party_name: String,
     pub documents: Vec<AgedDocument>,
+    #[serde(deserialize_with = "read_money_list")]
     pub buckets: Vec<Money>,
+    #[serde(deserialize_with = "read_money")]
     pub total: Money,
 }
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgedPayables {
+    pub through_opening_batch_id: i64,
     pub company_id: i64,
-    #[serde(serialize_with = "date_text")]
+    #[serde(serialize_with = "date_text", deserialize_with = "read_date")]
     pub as_of: Date,
     pub through_entry_number: i64,
     pub bucket_days: Vec<i32>,
     pub parties: Vec<AgedParty>,
+    #[serde(deserialize_with = "read_money_list")]
     pub buckets: Vec<Money>,
+    #[serde(deserialize_with = "read_money")]
     pub total: Money,
     pub exceptions: Vec<AgedDocument>,
+    #[serde(deserialize_with = "read_money")]
     pub exceptions_total: Money,
 }
 #[derive(Clone, Debug, Default)]
@@ -91,6 +107,7 @@ pub struct ControlAccount {
 }
 #[derive(Clone, Debug)]
 pub struct TieOut {
+    pub through_opening_batch_id: i64,
     pub company_id: i64,
     pub as_of: Date,
     pub through_entry_number: i64,
@@ -108,6 +125,7 @@ SELECT b.id,b.total
 - COALESCE((SELECT sum(n.total) FROM finance_payables_documents n WHERE n.tenant_id=b.tenant_id AND n.company_id=b.company_id AND n.corrects_document_id=b.id AND n.status='posted' AND n.document_date<=$3::text::date AND n.entry_number<=$4),0)
 - COALESCE((SELECT sum(a.amount) FROM finance_payables_payment_allocations a JOIN finance_payables_payments p ON p.tenant_id=a.tenant_id AND p.company_id=a.company_id AND p.id=a.payment_id WHERE a.tenant_id=b.tenant_id AND a.company_id=b.company_id AND a.document_id=b.id AND p.payment_date<=$3::text::date AND p.entry_number<=$4 AND NOT EXISTS(SELECT 1 FROM finance_payables_payments r WHERE r.tenant_id=p.tenant_id AND r.company_id=p.company_id AND r.reverses_payment_id=p.id AND r.payment_date<=$3::text::date AND r.entry_number<=$4)),0) AS owed
 FROM finance_payables_documents b WHERE b.tenant_id=$1 AND b.company_id=$2 AND b.document_type='bill' AND b.status='posted' AND b.document_date<=$3::text::date AND b.entry_number<=$4
+AND NOT EXISTS(SELECT 1 FROM finance_payables_opening_items i JOIN finance_payables_opening_batches o ON o.id=i.batch_id AND o.tenant_id=$1 AND o.company_id=$2 WHERE i.tenant_id=$1 AND i.company_id=$2 AND i.document_id=b.id AND o.conversion_date>$3::text::date)
 "#;
 pub(crate) async fn owed(
     c: &dyn OperationClient,
@@ -178,8 +196,9 @@ impl Payables {
         {
             return Err(PayablesError::InvalidOption);
         }
+        let opening_pin = crate::opening::pin(c, s, company, q.through_opening_batch_id).await?;
         let through=match q.through_entry_number {Some(n)=>n,None=>c.query_one("SELECT greatest(COALESCE((SELECT max(entry_number) FROM finance_payables_documents WHERE tenant_id=$1 AND company_id=$2),0),COALESCE((SELECT max(entry_number) FROM finance_payables_payments WHERE tenant_id=$1 AND company_id=$2),0))",&[&s.tenant(),&company]).await?.get(0)};
-        let rows=c.query(&format!("SELECT b.id,b.document_number,b.party_key,b.party_name,b.party_document_number,b.document_date::text,b.due_date::text,b.currency_code,b.total,o.owed FROM ({OWED}) o JOIN finance_payables_documents b ON b.id=o.id AND b.tenant_id=$1 AND b.company_id=$2 WHERE o.owed<>0 ORDER BY b.party_key,b.due_date,b.id"),&[&s.tenant(),&company,&as_of.to_string(),&through]).await?;
+        let rows=c.query(&format!("SELECT b.id,b.document_number,b.party_key,b.party_name,b.party_document_number,b.document_date::text,b.due_date::text,b.currency_code,b.total,o.owed FROM ({OWED}) o JOIN finance_payables_documents b ON b.id=o.id AND b.tenant_id=$1 AND b.company_id=$2 WHERE o.owed<>0 AND NOT EXISTS(SELECT 1 FROM finance_payables_opening_items i WHERE i.tenant_id=$1 AND i.company_id=$2 AND i.document_id=b.id AND i.batch_id>$5) ORDER BY b.party_key,b.due_date,b.id"),&[&s.tenant(),&company,&as_of.to_string(),&through,&opening_pin]).await?;
         let empty = vec![Money::ZERO; q.bucket_days.len() + 2];
         let mut parties: BTreeMap<String, AgedParty> = BTreeMap::new();
         let mut latest: BTreeMap<String, (Date, i64)> = BTreeMap::new();
@@ -247,6 +266,7 @@ impl Payables {
             }
         }
         Ok(AgedPayables {
+            through_opening_batch_id: opening_pin,
             company_id: company,
             as_of,
             through_entry_number: through,
@@ -286,14 +306,14 @@ impl Payables {
         s: &Scope,
         company: i64,
         as_of: Date,
-        through: Option<i64>,
+        pins: &BalancePins,
     ) -> Result<TieOut> {
         // Release this connection before reading the ledger through its facade.
         {
             let c = self.db.get().await.map_err(Error::from)?;
             authorize(&**c, s, company, VIEW).await?;
         }
-        fence(through)?;
+        fence(pins.through_entry_number)?;
         let ledger = self
             .ledger
             .account_totals_by_owner(
@@ -301,14 +321,16 @@ impl Payables {
                 company,
                 &TotalsQuery {
                     to: Some(as_of),
-                    through_entry_number: through,
+                    through_entry_number: pins.through_entry_number,
                     ..Default::default()
                 },
             )
             .await?;
         let chart = self.ledger.list_accounts(s, company).await?;
         let c = self.db.get().await.map_err(Error::from)?;
-        let rows=c.query(&format!("SELECT b.payable_account_id,sum(o.owed) FROM ({OWED}) o JOIN finance_payables_documents b ON b.id=o.id AND b.tenant_id=$1 AND b.company_id=$2 GROUP BY b.payable_account_id"),&[&s.tenant(),&company,&as_of.to_string(),&ledger.through_entry_number]).await?;
+        let opening_pin =
+            crate::opening::pin(&**c, s, company, pins.through_opening_batch_id).await?;
+        let rows=c.query(&format!("SELECT b.payable_account_id,sum(o.owed) FROM ({OWED}) o JOIN finance_payables_documents b ON b.id=o.id AND b.tenant_id=$1 AND b.company_id=$2 WHERE NOT EXISTS(SELECT 1 FROM finance_payables_opening_items i WHERE i.tenant_id=$1 AND i.company_id=$2 AND i.document_id=b.id AND i.batch_id>$5) GROUP BY b.payable_account_id"),&[&s.tenant(),&company,&as_of.to_string(),&ledger.through_entry_number,&opening_pin]).await?;
         let mut subledger = BTreeMap::new();
         for r in rows {
             subledger.insert(r.get::<_, i64>(0), store::money(r.get(1))?);
@@ -347,6 +369,7 @@ impl Payables {
         }
         accounts.sort_by(|a, b| a.code.cmp(&b.code));
         Ok(TieOut {
+            through_opening_batch_id: opening_pin,
             company_id: company,
             as_of,
             through_entry_number: ledger.through_entry_number,
@@ -365,4 +388,44 @@ fn date_text<S: serde::Serializer>(
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
     serializer.collect_str(date)
+}
+
+impl TieOut {
+    pub fn pins(&self) -> BalancePins {
+        BalancePins {
+            through_entry_number: Some(self.through_entry_number),
+            through_opening_batch_id: Some(self.through_opening_batch_id),
+        }
+    }
+}
+impl AgedPayables {
+    pub fn pins(&self) -> BalancePins {
+        BalancePins {
+            through_entry_number: Some(self.through_entry_number),
+            through_opening_batch_id: Some(self.through_opening_batch_id),
+        }
+    }
+}
+
+// Trusted contract output, already validated at the book boundary, retains the
+// database's maximum precision when decoded for the server-rendered page.
+fn read_money<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Money, D::Error> {
+    use serde::Deserialize;
+    Money::parse(&String::deserialize(d)?, MinorUnits::new(4).unwrap())
+        .map_err(serde::de::Error::custom)
+}
+fn read_money_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<Money>, D::Error> {
+    use serde::Deserialize;
+    Vec::<String>::deserialize(d)?
+        .into_iter()
+        .map(|s| Money::parse(&s, MinorUnits::new(4).unwrap()).map_err(serde::de::Error::custom))
+        .collect()
+}
+fn read_date<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Date, D::Error> {
+    use serde::Deserialize;
+    String::deserialize(d)?
+        .parse()
+        .map_err(serde::de::Error::custom)
 }

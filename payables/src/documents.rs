@@ -52,6 +52,7 @@ async fn note_capacity(
     let Some(bill) = bill else {
         return Ok(serde_json::Value::Null);
     };
+    crate::opening::settlement_date(c, tenant, company, bill, as_of, "document_date").await?;
     let lowest = balances::lowest(c, tenant, company, bill, as_of).await?;
     if amount > lowest {
         return Err(PayablesError::ExceedsOutstanding);
@@ -390,26 +391,9 @@ impl Payables {
                         .ok_or_else(|| invalid("vendor_id", "is required"))?,
                 )
                 .await?;
-            let facts = bilibi_finance_ledger::CompanyLinks::new(&self.parties)
-                .frozen_party(tx.sql(), s, vendor.company.id, "vendor_id", false)
+            let facts = self
+                .frozen_vendor_party(tx.sql(), s, vendor.company.id)
                 .await?;
-            for (field, label, max) in [
-                ("party_name", "name", 200),
-                ("party_tax_identifier", "tax ID", 50),
-                ("party_registration_identifier", "registration number", 50),
-            ] {
-                if facts[field]
-                    .as_str()
-                    .is_some_and(|v| v.chars().count() > max)
-                {
-                    return Err(invalid(
-                        "vendor_id",
-                        format!(
-                            "the company's {label} exceeds the document's {max} character limit"
-                        ),
-                    ));
-                }
-            }
             header["party_name"] = facts["party_name"].clone();
             header["party_tax_id"] = facts["party_tax_identifier"].clone();
             header["party_registration_id"] = facts["party_registration_identifier"].clone();

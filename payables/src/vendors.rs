@@ -273,6 +273,32 @@ impl Payables {
         })).await?;
         self.vendor_on(tx.sql(), s, company, id).await
     }
+    pub(crate) async fn frozen_vendor_party(
+        &self,
+        c: &(impl GenericClient + Sync),
+        s: &Scope,
+        core_company: i64,
+    ) -> Result<Value> {
+        let facts = bilibi_finance_ledger::CompanyLinks::new(&self.parties)
+            .frozen_party(c, s, core_company, "vendor_id", false)
+            .await?;
+        for (field, label, max) in [
+            ("party_name", "name", 200),
+            ("party_tax_identifier", "tax ID", 50),
+            ("party_registration_identifier", "registration number", 50),
+        ] {
+            if facts[field]
+                .as_str()
+                .is_some_and(|v| v.chars().count() > max)
+            {
+                return Err(invalid(
+                    "vendor_id",
+                    format!("the company's {label} exceeds the document's {max} character limit"),
+                ));
+            }
+        }
+        Ok(facts)
+    }
     pub(crate) fn billable(v: &Vendor) -> Result<()> {
         if !v.active {
             return Err(invalid("vendor_id", "is an inactive vendor"));

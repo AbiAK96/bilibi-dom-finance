@@ -250,7 +250,7 @@ they govern this code and are not copied here.
   `list_accounts_on`, `get_entry_on` and `Payables::get_document_on`, not pooled
   methods: another connection while holding the company lock can exhaust the pool.
 - Register assets through `FixedAssets`, never by posting or claiming their
-  acquisition entry: it freezes one whole source debit and its revision;
+  acquisition entry: ordinary acquisitions freeze one whole source debit and its revision; opening registers use `import_opening_register` against approved aggregate balances, preserving source accumulation and prospective remaining life;
   projected schedules are not posted depreciation (see `fixed_assets/README.md`).
 - A customer or vendor is a Finance record linked to a
   Core company through Base Records (`record_kind`/`record_id`, checked with
@@ -272,7 +272,8 @@ they govern this code and are not copied here.
   keeps them. Issue through `issue_document` and settle through `record_payment`
   / `reverse_payment`: they retain each invoice's original control after setup
   changes and commit its record with the owned entry. Read dated figures with
-  the report facade at one entry pin, never the unbounded document outstanding.
+  the report facade at its entry and opening-batch pins (`report.pins()`), never
+  the unbounded document outstanding.
 - Validate a document to issue with `Draft::validate` (the shape every
   authority shares, then `Authority::validate`), never with checks of your own
   on the facade: it derives every amount and answers `FieldError`s at the

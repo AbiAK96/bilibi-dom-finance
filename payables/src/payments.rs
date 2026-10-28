@@ -477,6 +477,15 @@ impl Payables {
                         "has another supplier key; pay each historical key separately",
                     ));
                 }
+                crate::opening::settlement_date(
+                    c,
+                    s.tenant(),
+                    company,
+                    b.id,
+                    input.payment_date,
+                    "document_id",
+                )
+                .await?;
                 if b.document_date > input.payment_date {
                     return Err(invalid("document_id", "is dated after the payment"));
                 }

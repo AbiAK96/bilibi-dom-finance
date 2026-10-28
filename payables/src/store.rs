@@ -6,6 +6,8 @@ use tokio_postgres::{GenericClient, Row};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Table {
+    OpeningBatch,
+    OpeningItem,
     Vendors,
     VendorKeys,
     Settings,
@@ -28,6 +30,8 @@ pub(crate) enum Table {
 impl Table {
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::OpeningBatch => "finance_payables_opening_batches",
+            Self::OpeningItem => "finance_payables_opening_items",
             Self::Vendors => "finance_payables_vendors",
             Self::VendorKeys => "finance_payables_vendor_keys",
             Self::MatchEvents => "finance_payables_match_events",
@@ -50,6 +54,8 @@ impl Table {
     }
     fn kind(self) -> &'static str {
         match self {
+            Self::OpeningBatch => "finance.payables.opening_batch",
+            Self::OpeningItem => "finance.payables.opening_item",
             Self::Vendors => "finance.payables.vendor",
             Self::VendorKeys => "finance.payables.vendor_key",
             Self::Settings => "finance.payables.settings",
@@ -218,6 +224,7 @@ pub(crate) async fn document_record(
         None
     };
     Ok(Some(Document {
+        opening: c.query_opt("SELECT i.source_facts || jsonb_build_object('source_reference',b.source_reference,'conversion_date',b.conversion_date::text) FROM finance_payables_opening_items i JOIN finance_payables_opening_batches b ON b.id=i.batch_id AND b.tenant_id=$1 AND b.company_id=$2 WHERE i.tenant_id=$1 AND i.company_id=$2 AND i.document_id=$3",&[&tenant,&company,&id]).await?.map(|r|r.get(0)),
         id,
         vendor_id: crate::vendors::mapped(c, tenant, company, &text(&v, "party_key")?).await?,
         document_type: kind,
