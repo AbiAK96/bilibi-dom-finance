@@ -73,6 +73,17 @@ fn id(input: &Value, field: &str) -> Result<i64> {
 fn text<'a>(input: &'a Value, field: &str) -> Result<&'a str> {
     input[field].as_str().ok_or(LedgerError::InvalidOption)
 }
+/// The book's currency code, trimmed and upcased, once its shape is valid;
+/// the list is asked only after, so a typo reads as a format error.
+fn shaped_code(input: &Value) -> Result<String> {
+    let code = text(input, "currency_code")?.trim().to_ascii_uppercase();
+    books::validate(&NewBook {
+        currency_code: code.clone(),
+        minor_units: 0,
+    })
+    .map_err(LedgerError::Invalid)?;
+    Ok(code)
+}
 fn date(input: &Value, field: &str) -> Result<Date> {
     text(input, field)?.parse().map_err(|_| {
         LedgerError::Invalid(vec![FieldError::new("entry_date", "has invalid format")])
@@ -276,6 +287,7 @@ impl Write {
         client: &dyn OperationClient,
         scope: &Scope,
         input: &Value,
+        tx: Option<&MutationTransaction<'_>>,
     ) -> Result<Value> {
         let company = id(input, "company_id")?;
         authorize_on(client, scope, company, self.capability()).await?;
@@ -295,13 +307,23 @@ impl Write {
                 if book.is_some() {
                     return Err(LedgerError::BookAlreadyOpen);
                 }
+                let code = shaped_code(input)?;
+                let chosen = match tx {
+                    Some(tx) => currency::choose_on(tx, scope, &code).await?,
+                    None => currency::choose(client, scope, &code).await?,
+                }
+                .map_err(|refused| LedgerError::Invalid(vec![refused]))?;
+                let units = match input["minor_units"].as_i64() {
+                    Some(units) => units,
+                    None => currency::default_units(&chosen)
+                        .map_err(|missing| LedgerError::Invalid(vec![missing]))?,
+                };
                 let valid = books::validate(&NewBook {
-                    currency_code: text(input, "currency_code")?.into(),
-                    minor_units: input["minor_units"]
-                        .as_i64()
-                        .ok_or(LedgerError::InvalidOption)?,
+                    currency_code: code,
+                    minor_units: units,
                 })
                 .map_err(LedgerError::Invalid)?;
+                let currency = currency::facts(&valid.currency_code, units, &chosen);
                 let latest = duties::latest_change(client, tenant, company).await?;
                 let separation_required = input["separation_required"]
                     .as_bool()
@@ -313,7 +335,7 @@ impl Write {
                 } else {
                     None
                 };
-                json!({"before":null,"after":{"company_id":company,"currency_code":valid.currency_code,"minor_units":valid.minor_units,"controlled":true,"separation_required":separation_required,"approval_reason":reason},"duty_separation":duties::latest_change(client,tenant,company).await?})
+                json!({"before":null,"after":{"company_id":company,"currency_code":valid.currency_code,"minor_units":valid.minor_units,"currency":currency,"controlled":true,"separation_required":separation_required,"approval_reason":reason},"duty_separation":duties::latest_change(client,tenant,company).await?})
             }
             Self::CreateAccount | Self::UpdateAccount => {
                 let all = accounts::list(client, tenant, company).await?;
@@ -739,7 +761,10 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let review = self.review(client, scope, input).await.map_err(invalid)?;
+            let review = self
+                .review(client, scope, input, None)
+                .await
+                .map_err(invalid)?;
             fence(
                 client,
                 &json!({"action":self.consequence(),"input":input,"review":review}),
@@ -760,7 +785,10 @@ impl WriteHandler for Write {
             join(tx, scope, company, self.capability())
                 .await
                 .map_err(invalid)?;
-            let review = self.review(tx.sql(), scope, input).await.map_err(invalid)?;
+            let review = self
+                .review(tx.sql(), scope, input, Some(&*tx))
+                .await
+                .map_err(invalid)?;
             fence(
                 tx.sql(),
                 &json!({"action":self.consequence(),"input":input,"review":review}),
@@ -769,13 +797,24 @@ impl WriteHandler for Write {
             .await?;
             let record = match self {
                 Self::OpenBook => {
+                    let code = shaped_code(input).map_err(invalid)?;
+                    let minor_units = match input["minor_units"].as_i64() {
+                        Some(units) => units,
+                        None => {
+                            let chosen = currency::choose_on(tx, scope, &code)
+                                .await?
+                                .map_err(|refused| invalid(LedgerError::Invalid(vec![refused])))?;
+                            currency::default_units(&chosen)
+                                .map_err(|missing| invalid(LedgerError::Invalid(vec![missing])))?
+                        }
+                    };
                     let book = Ledger::open_book_on(
                         tx,
                         scope,
                         company,
                         &NewBook {
-                            currency_code: text(input, "currency_code").map_err(invalid)?.into(),
-                            minor_units: input["minor_units"].as_i64().ok_or(Error::Invalid)?,
+                            currency_code: code,
+                            minor_units,
                         },
                     )
                     .await
@@ -1008,6 +1047,7 @@ impl WriteHandler for Write {
 
 enum Read {
     Book,
+    Currencies,
     Accounts,
     Journal,
     Journals,
@@ -1038,7 +1078,29 @@ impl ReadHandler for Read {
             let limit = input["page_size"].as_u64().unwrap_or(100).min(100) as usize;
             let result = match self {
                 Self::Book => {
-                    json!({"book":books::find(client,tenant,company).await?,"controlled_bookkeeping":bookkeeping::latest(client,tenant,company).await?,"duty_separation":duties::latest_change(client,tenant,company).await?,"latest_entry_date":entries::latest_date(client,tenant,company).await?})
+                    let book = books::find(client, tenant, company).await?;
+                    let currency = match &book {
+                        Some(book) => {
+                            currency::describe(
+                                client,
+                                scope,
+                                &book.currency_code,
+                                i64::from(book.minor_units.get()),
+                            )
+                            .await?
+                        }
+                        None => Value::Null,
+                    };
+                    json!({"book":book,"currency":currency,"controlled_bookkeeping":bookkeeping::latest(client,tenant,company).await?,"duty_separation":duties::latest_change(client,tenant,company).await?,"latest_entry_date":entries::latest_date(client,tenant,company).await?})
+                }
+                Self::Currencies => {
+                    currency::options(
+                        client,
+                        scope,
+                        company,
+                        input["search"].as_str().unwrap_or(""),
+                    )
+                    .await?
                 }
                 Self::Accounts => {
                     let mut rows = accounts::page(
@@ -1202,8 +1264,8 @@ fn output() -> Value {
 }
 fn book_schema() -> Value {
     schema(
-        &["currency_code", "minor_units"],
-        json!({"currency_code":string(3),"minor_units":{"type":"integer","minimum":0,"maximum":4},"separation_required":boolean(),"approval_reason":string(500)}),
+        &["currency_code"],
+        json!({"currency_code":{"type":"string","maxLength":3,"description":"An enabled currency from finance.ledger.book.currencies, by its three-letter code. Permanent."},"minor_units":{"type":"integer","minimum":0,"maximum":4,"description":"Decimal places. Omit to use the currency's ISO 4217 standard, which the review shows; a different value is allowed and flagged as nonstandard. Required when the currency list is unavailable. Permanent."},"separation_required":boolean(),"approval_reason":string(500)}),
     )
 }
 fn account_schema() -> Value {
@@ -1367,6 +1429,12 @@ fn trial_balance_schema() -> Value {
         json!({"as_of":day(),"through_entry_number":{"type":"integer","minimum":0}}),
     )
 }
+fn currencies_schema() -> Value {
+    schema(
+        &[],
+        json!({"search":{"type":"string","maxLength":100,"description":"Part of a currency code or name."}}),
+    )
+}
 fn years_schema() -> Value {
     schema(
         &[],
@@ -1376,7 +1444,8 @@ fn years_schema() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS,"finance/ledger.operations",Provenance { module:MODULE,source:file!(),line:line!() }, &Definitions {
     operations:&[
-        Operation {key:"finance.ledger.book.get",title:"Read the book",summary:"Read currency, minor units and bookkeeping controls; book is null before opening.",keywords:&[],capability:VIEW,input:target_schema,output,handler:Handler::Read(&Read::Book),channels:Channels::Every,step_up:&[]},
+        Operation {key:"finance.ledger.book.get",title:"Read the book",summary:"Read currency, its name and standard decimal places, minor units and bookkeeping controls; book is null before opening.",keywords:&[],capability:VIEW,input:target_schema,output,handler:Handler::Read(&Read::Book),channels:Channels::Every,step_up:&[]},
+        Operation {key:"finance.ledger.book.currencies",title:"Choose the book's currency",summary:"List the enabled currencies with their ISO 4217 decimal places, matching a code or name, and the proposed currency: the company's base currency, else the tenant's. reference is none_enabled when the list is installed but no currency is enabled (no book can open yet), and unavailable when the list was never installed (a code is then accepted unchecked).",keywords:&[],capability:VIEW,input:currencies_schema,output,handler:Handler::Read(&Read::Currencies),channels:Channels::Every,step_up:&[]},
         Operation {key:"finance.ledger.journal.get",title:"Read a journal",summary:"Read lines, submission, decision, the approved entry identifier and whether it is the book's opening balances journal.",keywords:&[],capability:VIEW,input:journal_schema,output,handler:Handler::Read(&Read::Journal),channels:Channels::Every,step_up:&[]},
         Operation {key:"finance.ledger.account.list",title:"List accounts",summary:"Read the chart by code with a bounded cursor page: accounts, and account groups marked is_group.",keywords:&[],capability:VIEW,input:accounts_schema,output,handler:Handler::Read(&Read::Accounts),channels:Channels::Every,step_up:&[]},
         Operation {key:"finance.ledger.chart_balance.get",title:"Read the chart with balances",summary:"Read every account with its own balance and every account group with the total of the accounts under it, as of a date and counted through a pinned entry number. A group never has a balance of its own.",keywords:&[],capability:VIEW,input:trial_balance_schema,output,handler:Handler::Read(&Read::ChartBalances),channels:Channels::Every,step_up:&[]},

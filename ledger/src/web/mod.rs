@@ -184,6 +184,7 @@ menu!("finance.ledger.book", "Book", "/finance/ledger/book", 12);
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, Provenance { module: MODULE, source: file!(), line: line!() }, &PageWrites {
     service: PAGES,
     contracts: &[
+        ("review_open", "finance.ledger.book.open"),
         ("open_book", "finance.ledger.book.open"),
         ("create", "finance.ledger.account.create"),
         ("save_field", "finance.ledger.account.update"),

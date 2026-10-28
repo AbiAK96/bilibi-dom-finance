@@ -94,11 +94,45 @@ def refused(channel, key, company, contains, who="manager", **values):
     require(body.get("valid") is False and "plan_code" not in body and contains in json.dumps(body), f"{key}: expected refusal {contains}")
 
 
+unavailable_proved = False
 for channel, company in [("api", 1), ("mcp", 2)]:
     print(f"\n== {channel}: company {company}")
     require(read(channel, "book.get", company)["book"] is None, "proof needs an unopened book")
     require(invoke(channel, "guide", {"key": "finance.ledger"}), "guide missing")
     require(invoke(channel, "describe", {"key": "finance.ledger.journal.submit"}), "schema missing")
+    currencies = read(channel, "book.currencies", company)
+    if sql("SELECT count(*) FROM currencies") == "0" and not unavailable_proved:
+        # The ISO list is not installed: a well-formed code opens unchecked and needs its decimal places.
+        unavailable_proved = True
+        require(currencies["reference"] == "unavailable" and currencies["currencies"] == [], "list should be unavailable")
+        refused(channel, "book.open", company, "minor_units", currency_code="MYR")
+        unchecked = plan(channel, [operation("book.open", company, currency_code="MYR", minor_units=2)])
+        require(unchecked["results"][0]["preview"]["result"]["changes"]["after"]["currency"]["reference"] == "unchecked", "unchecked review not marked")
+        print("currency list unavailable: code accepted unchecked, decimal places required, review marked unchecked")
+    else:
+        # A disposable list of four currencies with three different decimal places; a seeded list keeps its own rows.
+        sql("INSERT INTO currencies (code, numeric_code, name, minor_units) VALUES ('MYR','458','Malaysian ringgit',2),('JPY','392','Japanese yen',0),('KWD','414','Kuwaiti dinar',3),('CHF','756','Swiss franc',2) ON CONFLICT DO NOTHING")
+        tenant = sql(f"SELECT tenant_id FROM companies WHERE id={company}")
+        sql(f"DELETE FROM currency_tenant_enabled WHERE tenant_id={tenant}")
+        none = read(channel, "book.currencies", company)
+        require(none["reference"] == "none_enabled" and none["currencies"] == [], "installed list with nothing enabled should say so")
+        refused(channel, "book.open", company, "no currency is enabled yet", currency_code="MYR", minor_units=2)
+        refused(channel, "book.open", company, "no currency is enabled yet", currency_code="QQQ", minor_units=2)
+        print("catalog installed, nothing enabled: reported as none_enabled, every book.open refused in the same words")
+        sql(f"INSERT INTO currency_tenant_enabled (tenant_id, code) VALUES ({tenant},'MYR'),({tenant},'JPY'),({tenant},'KWD')")
+        currencies = read(channel, "book.currencies", company)
+        require(currencies["reference"] == "iso4217", "list should be available once currencies are enabled")
+        found = read(channel, "book.currencies", company, search="dinar")["currencies"]
+        require(any(c["code"] == "KWD" and c["minor_units"] == 3 for c in found), "search by name failed")
+        require(read(channel, "book.currencies", company, search="jpy")["currencies"][0]["minor_units"] == 0, "search by code failed")
+        refused(channel, "book.open", company, "has invalid format", currency_code="RM1", minor_units=2)
+        refused(channel, "book.open", company, "is not a currency code", currency_code="QQQ", minor_units=2)
+        refused(channel, "book.open", company, "is not enabled", currency_code="CHF", minor_units=2)
+        after = lambda **v: plan(channel, [operation("book.open", company, currency_code="KWD", **v)])["results"][0]["preview"]["result"]["changes"]["after"]
+        standard, nonstandard = after(), after(minor_units=2)
+        require(standard["minor_units"] == 3 and standard["currency"]["currency_name"] == "Kuwaiti dinar" and standard["currency"]["nonstandard_minor_units"] is False, "default decimal places not the standard")
+        require(nonstandard["minor_units"] == 2 and nonstandard["currency"]["nonstandard_minor_units"] is True and nonstandard["currency"]["standard_minor_units"] == 3, "nonstandard not flagged")
+        print("currency list: search by name and code, refusals, standard default, nonstandard flagged, proposal:", (currencies["proposed"] or {}).get("source", "none"))
     direct = invoke(channel, "read", operation("book.open", company, currency_code="MYR", minor_units=2))
     require(direct.get("error") == "writes_not_enabled", "direct write was not refused")
     ops = [operation("book.open", company, currency_code="myr", minor_units=2)]
@@ -113,12 +147,13 @@ for channel, company in [("api", 1), ("mcp", 2)]:
     asset = write(channel, "account.create", company, code="A", name="Asset", account_type="asset")
     income = write(channel, "account.create", company, code="I", name="Income", account_type="income")
     retained = write(channel, "account.create", company, code="E", name="Equity", account_type="equity", retained_earnings=True)
-    child = write(channel, "account.create", company, code="B", name="Child", account_type="asset", parent_id=asset["id"])
+    group = write(channel, "account_group.create", company, code="G", name="Asset group", account_type="asset")
+    child = write(channel, "account.create", company, code="B", name="Child", account_type="asset", parent_id=group["id"])
     child = write(channel, "account.update", company, account_id=child["id"], name="Changed", clear_parent=True, active=False)
     require(child["parent_id"] is None and child["active"] is False, "account update lost fields")
     page = read(channel, "account.list", company, page_size=2)
     page2 = read(channel, "account.list", company, page_size=2, after_code=page["next_after_code"])
-    require([a["code"] for a in page["records"] + page2["records"]] == ["A", "B", "E", "I"], "account cursor skipped/duplicated rows")
+    require([a["code"] for a in page["records"] + page2["records"]] == ["A", "B", "E", "G"], "account cursor skipped/duplicated rows")
     # Locale-aware PostgreSQL ordering must also govern the cursor predicate.
     # The original Rust string comparison skipped B after a in en_US.UTF-8.
     for code in ["a", "É", "z"]:
