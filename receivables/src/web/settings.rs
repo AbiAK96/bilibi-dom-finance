@@ -221,25 +221,20 @@ impl Settings {
             .collect()
     }
 
-    /// The receivable account choices: an asset account that receipts have
-    /// been recorded as paid into is listed after the others and says so. That
-    /// is all Receivables knows; no account is called a bank account.
+    /// The receivable account choices: the active asset accounts, without
+    /// those receipts have been recorded as paid into (a bank or cash account),
+    /// except the one already saved; `setup.configure` refuses them too, which
+    /// covers receipts not read here.
     fn receivable_choices(&self) -> Vec<Choice> {
-        let asset = |a: &&Account| a.active && a.account_type == "asset";
-        let (paid_into, others): (Vec<&Account>, Vec<&Account>) = self
-            .accounts
+        self.accounts
             .iter()
-            .filter(asset)
-            .partition(|a| self.receipts_into.contains(&a.id));
-        others
-            .into_iter()
+            .filter(|a| {
+                a.active
+                    && a.account_type == "asset"
+                    && (!self.receipts_into.contains(&a.id)
+                        || self.setup.as_ref().map(|s| s.receivable_account_id) == Some(a.id))
+            })
             .map(|a| Choice::new(a.choice_label(), a.id.to_string()))
-            .chain(paid_into.into_iter().map(|a| {
-                Choice::new(
-                    format!("{} – receipts are paid into this account", a.choice_label()),
-                    a.id.to_string(),
-                )
-            }))
             .collect()
     }
 
@@ -287,7 +282,7 @@ impl Settings {
             )
         } else if key == "receivable_account_id" && self.receipts_cut {
             format!(
-                "{hint} Only the first {READ_LIMIT} receipts were checked for accounts receipts are paid into."
+                "{hint} Only the first {READ_LIMIT} receipts were checked for accounts receipts are paid into; the ledger refuses such an account."
             )
         } else {
             hint.to_owned()
@@ -841,7 +836,7 @@ impl Settings {
                     .prompt("Choose a liability account")
                     .options(self.account_choices("liability"))
                     .required()
-                    .hint("Tax on invoice lines is credited to this liability account when the invoice is issued, whether or not the customer has paid. Paying the tax over is recorded separately."),
+                    .hint("The liability account tax on a document is posted to when it is issued. It records tax on the document, not that the customer has paid, that tax is due or that it was remitted: timing depends on the tax regime. Review the tax code and return before filing."),
             )?);
         }
         body.push(&render(
