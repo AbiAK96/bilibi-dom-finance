@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) const PAGES: &str = "finance/payables.opening-pages";
 const CONTRACT: &str = "finance.payables.opening.import";
+const STAGE: &str = "finance.payables.opening.stage";
 const CONTEXT: &str = "finance.payables.opening.context";
 const TITLE: &str = "Opening bills";
 #[derive(Clone)]
@@ -30,7 +31,7 @@ pub(crate) struct Pages {
     pub plans: Arc<bilibi_agent_api::plans::Plans>,
 }
 inventory::submit! {Contribution::new(ROUTES,PAGES,Provenance{module:MODULE,source:file!(),line:line!()},&Route{method:Method::Get,path:"/finance/payables/opening",service:PAGES,operation:"opening",access:Access::Capability(VIEW),framed:true})}
-inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,Provenance{module:MODULE,source:file!(),line:line!()},&PageWrites{service:PAGES,contracts:&[("preview_opening",CONTRACT),("import_opening",CONTRACT)],pending:Pending::None})}
+inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,Provenance{module:MODULE,source:file!(),line:line!()},&PageWrites{service:PAGES,contracts:&[("preview_opening",CONTRACT),("import_opening",CONTRACT),("preview_opening",STAGE),("import_opening",STAGE)],pending:Pending::None})}
 bilibi_menu::contribute!(
     "finance/payables",
     bilibi_menu::MenuItem::page(
@@ -45,6 +46,10 @@ bilibi_menu::contribute!(
 );
 fn field_label(key: &str) -> &str {
     match key {
+        "part" => "Batch number",
+        "part_count" => "Batch count",
+        "replaces_batch_id" => "Register to replace",
+        "reason" => "Correction reason",
         "csv" => "Source register CSV",
         "series_id" => "Opening invoice series",
         "source_reference" => "Source reference",
@@ -66,6 +71,7 @@ struct Actions {
     buttons: Html,
 }
 struct Review {
+    contract: &'static str,
     code: String,
     input: Value,
     facts: Value,
@@ -78,6 +84,7 @@ struct Opening {
     review: Option<Review>,
     columns: ListColumns,
     balance_columns: ListColumns,
+    stage_columns: ListColumns,
 }
 impl Opening {
     fn new(pages: Pages) -> Result<Self> {
@@ -87,6 +94,15 @@ impl Opening {
             fields: BTreeMap::new(),
             message: None,
             review: None,
+            stage_columns: ListColumns::mount(
+                "conversion-stages",
+                vec![
+                    BuiltinColumn::new("source", "Source reference"),
+                    BuiltinColumn::new("batch", "Batch"),
+                    BuiltinColumn::new("state", "State"),
+                ],
+            )
+            .map_err(|_| Error::Internal)?,
             balance_columns: ListColumns::mount(
                 "conversion-balances",
                 vec![
@@ -233,8 +249,49 @@ impl Opening {
                 ..Alert::default()
             })?);
             if !context["batch"].is_null() {
-                page.push(&render(Alert{id:"conversion-recorded",kind:StatusKind::Info,body:Html::text(&format!("Imported source {}. The source evidence is retained. Use the normal settlement and reporting pages for these opening records.",context["batch"]["source_reference"].as_str().unwrap_or(""))),..Alert::default()})?);
-            } else if allowed {
+                page.push(&render(Alert{id:"conversion-recorded",kind:StatusKind::Info,body:Html::text(&format!("Reconciled register {}. The source evidence is retained. To correct it, stage a new source export naming this register ID and request independent approval.",context["batch"]["id"])),..Alert::default()})?);
+            }
+            let stage_rows = context["stages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|stage| {
+                    let reference = stage["source_reference"].as_str().unwrap_or("");
+                    let reconciled = context["decisions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|d| d["review"]["source_reference"] == reference);
+                    FlexRow::new(stage["id"].to_string())
+                        .cell("source", Cell::text(reference))
+                        .cell(
+                            "batch",
+                            Cell::text(format!("{} / {}", stage["part"], stage["part_count"])),
+                        )
+                        .cell(
+                            "state",
+                            Cell::text(if reconciled {
+                                "Reconciled"
+                            } else {
+                                "Committed source batch"
+                            }),
+                        )
+                })
+                .collect::<Vec<_>>();
+            if !stage_rows.is_empty() {
+                let mut table = FlexTable::new(
+                    "conversion-stages",
+                    self.stage_columns.flex_columns(),
+                    stage_rows,
+                );
+                table.event = "stage_grid";
+                table.caption = "Retained source batches";
+                table.zoom = self.stage_columns.zoom;
+                table.suggestions = self.stage_columns.flex_suggestions();
+                table.add_query = &self.stage_columns.add_query;
+                page.push(&render(table)?);
+            }
+            if allowed {
                 if self.values["currency_code"].is_null() {
                     self.values["currency_code"] = json!(currency);
                 }
@@ -256,6 +313,20 @@ impl Opening {
                     }
                 }
                 fields.push(&render(summary)?);
+                fields.push(&render(
+                    Field::in_form("conversion", "mode")
+                        .id("conversion-mode")
+                        .label("Action")
+                        .kind(InputKind::Select)
+                        .options(vec![
+                            bilibi_ui::Choice::new("Import complete register", "direct"),
+                            bilibi_ui::Choice::new("Stage source batch", "stage"),
+                            bilibi_ui::Choice::new("Reconcile staged register", "reconcile"),
+                        ])
+                        .value(self.values["mode"].as_str().unwrap_or("direct")),
+                )?);
+                let staged = context["stages"].as_array().map_or(0, Vec::len);
+                fields.push(&render(Alert{id:"conversion-staged",kind:StatusKind::Info,body:Html::text(&format!("{staged} source batches retained. Stage each numbered batch under the same source reference and batch count. Reconcile with CSV empty after every batch is present. Staging commits source evidence; reconciliation creates the opening records.")),..Alert::default()})?);
                 for (key, label, kind, required, hint) in [
                     (
                         "source_reference",
@@ -275,7 +346,7 @@ impl Opening {
                         "csv",
                         "Source register CSV",
                         InputKind::Textarea,
-                        true,
+                        false,
                         "Paste the complete register: 1 to 500 rows, at most 128 KiB.",
                     ),
                     (
@@ -285,6 +356,10 @@ impl Opening {
                         false,
                         "Required only when overriding separation of duties with the appropriate authority.",
                     ),
+                    ("part","Batch number",InputKind::Number,false,"For staging: sequential batch number, starting at 1."),
+                    ("part_count","Batch count",InputKind::Number,false,"For staging: total batches in this export, at most 200."),
+                    ("replaces_batch_id","Register to replace",InputKind::Number,false,"For a correction: the current reconciled register ID. Keep the same ID for all source batches."),
+                    ("reason","Correction reason",InputKind::Text,false,"Required for a correction. Preserve the prior export and explain the replacement."),
                 ] {
                     let mut field = Field::in_form("conversion", key)
                         .id(format!("conversion-{key}"))
@@ -328,7 +403,7 @@ impl Opening {
                         buttons: render(Button {
                             id: "conversion-preview",
                             button_type: "submit",
-                            body: Html::text("Preview import"),
+                            body: Html::text("Preview action"),
                             variant: ButtonVariant::Primary,
                             working: "Checking…",
                             ..Button::default()
@@ -396,7 +471,10 @@ impl Opening {
                 .await?
                 .banner("conversion-instance", "")
                 .map_err(|_| Error::Internal)?;
-            body.push(&render(Alert{id:"conversion-review-context",body:Html::text(&format!("Conversion date {}. Source {}. {} records. Review every source identifier, date, amount and account mapping before approval.",facts["conversion_date"].as_str().unwrap_or(""),facts["source_reference"].as_str().unwrap_or(""),facts["rows"].as_array().map_or(0,Vec::len))),..Alert::default()})?);
+            body.push(&render(Alert{id:"conversion-review-context",body:Html::text(&format!("Conversion date {}. Source {}. {} records. Review every source identifier, date, amount and account mapping before approval.",facts["conversion_date"].as_str().or_else(||context["opening"]["entry"]["entry_date"].as_str()).unwrap_or(""),facts["source_reference"].as_str().unwrap_or(""),facts["rows"].as_array().map_or_else(||facts["rows"].as_u64().unwrap_or(0) as usize,Vec::len))),..Alert::default()})?);
+            if !facts["replaces_batch_id"].is_null() {
+                body.push(&render(Alert{id:"conversion-correction-review",kind:StatusKind::Warning,body:Html::text(&format!("Replace register {} as of the conversion date {}. Reason: {}. Prior records and approvals remain available at their original report boundaries.",facts["replaces_batch_id"],facts["conversion_date"].as_str().unwrap_or(""),facts["reason"].as_str().unwrap_or(""))),..Alert::default()})?);
+            }
             if let Some(reconciliation) = facts["reconciliation"].as_array() {
                 let rows = reconciliation
                     .iter()
@@ -444,8 +522,14 @@ impl Opening {
                     ],
                 })?);
             }
-            body.push(&render(table)?);
-            body.push(&render(Alert{id:"conversion-review-reconciliation",kind:StatusKind::Info,body:Html::text("The complete register reconciles exactly to the approved opening account balances. This import records opening state and retains source evidence; it creates no new ledger entry."),..Alert::default()})?);
+            if review.contract != STAGE {
+                body.push(&render(table)?);
+            }
+            if review.contract != STAGE {
+                body.push(&render(Alert{id:"conversion-review-reconciliation",kind:StatusKind::Info,body:Html::text("The complete register reconciles exactly to the approved opening account balances. This import records opening state and retains source evidence; it creates no new ledger entry."),..Alert::default()})?);
+            } else {
+                body.push(&render(Alert{id:"conversion-stage-review",body:Html::text(&format!("Previewed source batch {} of {}, containing {} rows. Committing this batch retains source evidence. It does not create opening records or approve reconciliation.",facts["part"],facts["part_count"],facts["rows"])),..Alert::default()})?);
+            }
             if let Some(policy) = facts["depreciation"].as_str() {
                 body.push(&render(Alert {
                     id: "conversion-depreciation",
@@ -453,7 +537,7 @@ impl Opening {
                     ..Alert::default()
                 })?);
             }
-            body.push(&render(Alert{id:"conversion-final",kind:StatusKind::Warning,body:Html::text("The imported register is permanent. Corrections to a committed opening import are not yet supported. The opening journal cannot be reversed while imported records depend on it."),..Alert::default()})?);
+            body.push(&render(Alert{id:"conversion-final",kind:StatusKind::Warning,body:Html::text("Source batches and reconciled registers are permanent evidence. A correction retains the prior register and requires dependent activity to be reversed first. The opening journal remains protected against reversal."),..Alert::default()})?);
             let mut buttons = render(Button {
                 button_type: "button",
                 event: "cancel_opening",
@@ -464,7 +548,11 @@ impl Opening {
                 id: "conversion-import",
                 button_type: "button",
                 event: "import_opening",
-                body: Html::text("Approve import"),
+                body: Html::text(if review.contract == STAGE {
+                    "Commit source batch"
+                } else {
+                    "Approve reconciliation"
+                }),
                 variant: ButtonVariant::Primary,
                 working: "Importing…",
                 ..Button::default()
@@ -472,8 +560,16 @@ impl Opening {
             body.push(&render(Actions { buttons })?);
             page.push(&render(Modal {
                 id: "conversion-review-modal",
-                title: "Review opening import",
-                description: "Approve the reconciled opening register for the current company.",
+                title: if review.contract == STAGE {
+                    "Review source batch"
+                } else {
+                    "Review opening import"
+                },
+                description: if review.contract == STAGE {
+                    "Commit this source batch for later reconciliation."
+                } else {
+                    "Approve the reconciled opening register for the current company."
+                },
                 cancel_event: "cancel_opening",
                 width: ModalWidth::Wide,
                 body,
@@ -520,12 +616,37 @@ impl LiveState<Scope, Error> for Opening {
                                 .expect("form object")
                                 .remove("override_reason");
                         }
+                        let contract = if self.values["mode"] == "stage" {
+                            STAGE
+                        } else {
+                            CONTRACT
+                        };
+                        let staged = self.values["mode"] == "reconcile";
+                        if let Some(object) = input.as_object_mut() {
+                            object.remove("mode");
+                            for key in ["part", "part_count", "replaces_batch_id"] {
+                                let value = object
+                                    .get(key)
+                                    .and_then(Value::as_str)
+                                    .and_then(|text| text.parse::<i64>().ok());
+                                object.remove(key);
+                                if let Some(value) = value {
+                                    object.insert(key.into(), json!(value));
+                                }
+                            }
+                            if object.get("reason").is_some_and(|v| v == "") {
+                                object.remove("reason");
+                            }
+                            if staged {
+                                object.insert("staged".into(), json!(true));
+                            }
+                        }
                         let call = Call {
                             scope: r.scope,
                             credential: r.credential,
                             service: PAGES,
                             event: "preview_opening",
-                            contract: CONTRACT,
+                            contract,
                         };
                         match self.pages.contracts.preview(&call, input.clone()).await {
                             Ok(answer) => {
@@ -539,6 +660,7 @@ impl LiveState<Scope, Error> for Opening {
                                             });
                                         }
                                         self.review = Some(Review {
+                                            contract,
                                             code: code.into(),
                                             input,
                                             facts,
@@ -558,7 +680,7 @@ impl LiveState<Scope, Error> for Opening {
                                 credential: r.credential,
                                 service: PAGES,
                                 event: "import_opening",
-                                contract: CONTRACT,
+                                contract: review.contract,
                             };
                             match self
                                 .pages
@@ -569,7 +691,11 @@ impl LiveState<Scope, Error> for Opening {
                                 Ok(_) => {
                                     self.message = Some((
                                         StatusKind::Success,
-                                        "The opening register was imported and reconciled.".into(),
+                                        if review.contract == STAGE {
+                                            "The source batch was committed. Continue staging or reconcile the complete register.".into()
+                                        } else {
+                                            "The opening register was reconciled. Prior source evidence is retained.".into()
+                                        },
                                     ))
                                 }
                                 Err(e) => self.fail(e),
@@ -577,6 +703,9 @@ impl LiveState<Scope, Error> for Opening {
                         }
                     }
                     "cancel_opening" => self.review = None,
+                    "stage_grid" => {
+                        self.stage_columns.handle(&params::string_values(value));
+                    }
                     "balance_grid" => {
                         self.balance_columns.handle(&params::string_values(value));
                     }
