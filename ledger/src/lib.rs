@@ -73,6 +73,8 @@ mod evidence;
 mod journals;
 mod late_recordings;
 mod money;
+mod opening;
+mod opening_csv;
 mod periods;
 mod postings;
 mod totals;
@@ -85,6 +87,7 @@ pub use contributions::{
 };
 pub use evidence::EvidencePage;
 pub use money::{MinorUnits, Money, MoneyError};
+pub use opening::OpeningBalances;
 
 use bilibi_company::WriteError;
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction};
@@ -112,6 +115,7 @@ inventory::submit! {
             ("finance-ledger-004-periods", include_str!("../migrations/004-periods.sql")),
             ("finance-ledger-005-journals", include_str!("../migrations/005-journals.sql")),
             ("finance-ledger-006-journal-withdrawal", include_str!("../migrations/006-journal-withdrawal.sql")),
+            ("finance-ledger-007-opening-balances", include_str!("../migrations/007-opening-balances.sql")),
         ],
         services: &[Service { id: SERVICE, factory: |services| {
             agent_operations::bind(services.get("base/tenancy.parties")?)?;
@@ -2301,6 +2305,7 @@ impl Ledger {
         join(tx, scope, company_id, SUBMIT_JOURNALS).await?;
         let tenant = scope.tenant();
         withdrawable_journal(tx.sql(), scope, company_id, journal_id).await?;
+        opening::refuse_manual_replacement(tx.sql(), scope, company_id, journal_id).await?;
         let reason = journals::validate_withdrawal_reason(reason).map_err(LedgerError::Invalid)?;
         // The replacement is checked and kept first, so a refusal of it
         // leaves nothing recorded; the withdrawal then names it.
