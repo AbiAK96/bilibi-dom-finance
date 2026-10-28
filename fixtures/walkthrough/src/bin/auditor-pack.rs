@@ -3,7 +3,7 @@ use bilibi_authz::grants::Grants;
 use bilibi_database::{pool, Error};
 use bilibi_finance_attachments::{Attachments, NewFile};
 use bilibi_finance_ledger::{Ledger, Money, NewEntry, NewLine, PostOptions, TotalsQuery};
-use bilibi_finance_reports::{Issue, Reports, ReportsError};
+use bilibi_finance_reports::{Issue, Period, Reports, ReportsError};
 use bilibi_finance_walkthrough_fixture::{
     attachments::configure_storage, install, records, sign_in, COMPANY,
 };
@@ -258,6 +258,62 @@ async fn main() -> Outcome<()> {
             None,
         )
         .await?;
+    // A pre-link customer represents an existing Finance record. Evidence is
+    // a snapshot of records at export time, independently of the entry pin.
+    let raw = db.get().await?;
+    raw.execute("INSERT INTO finance_receivables_customers(tenant_id,company_id,code,name,payment_terms_days,active,inserted_at,updated_at) VALUES(1,$1,'PACK-LEGACY','Pack legacy',0,true,now(),now())", &[&COMPANY]).await?;
+    drop(raw);
+    let ar = services
+        .get::<bilibi_finance_receivables::Receivables>(bilibi_finance_receivables::SERVICE)?;
+    let legacy = ar
+        .list_customers(&admin, COMPANY)
+        .await?
+        .into_iter()
+        .find(|c| c.code == "PACK-LEGACY")
+        .expect("legacy customer");
+    let before_link = reports
+        .export_auditor_pack(&admin, COMPANY, date(2026, 3, 31))
+        .await?;
+    let trial_before = ledger
+        .trial_balance(&admin, COMPANY, date(2026, 3, 31), None)
+        .await?;
+    let report_pin = trial_before.through_entry_number;
+    let periods = [Period {
+        from: date(2026, 3, 1),
+        to: date(2026, 3, 31),
+    }];
+    let profit_before = reports
+        .profit_and_loss(&admin, COMPANY, &periods, Some(report_pin))
+        .await?;
+    let before_bytes = reports
+        .read_auditor_pack(&admin, COMPANY, &before_link.id)
+        .await?;
+    let (_, before_files) = inspect(&before_bytes.bytes)?;
+    let before_csv = String::from_utf8(before_files["receivables-customer.csv"].clone())?;
+    assert!(before_csv
+        .lines()
+        .next()
+        .unwrap()
+        .ends_with("record_kind,record_id"));
+    assert!(before_csv
+        .lines()
+        .any(|row| row.contains("PACK-LEGACY") && row.ends_with(",\"\",\"\"")));
+    ar.link_customer(&admin, COMPANY, legacy.id, &json!({"core_company_id":20}))
+        .await?;
+    let trial_after = ledger
+        .trial_balance(&admin, COMPANY, date(2026, 3, 31), Some(report_pin))
+        .await?;
+    let profit_after = reports
+        .profit_and_loss(&admin, COMPANY, &periods, Some(report_pin))
+        .await?;
+    assert_eq!(
+        serde_json::to_vec(&trial_before)?,
+        serde_json::to_vec(&trial_after)?
+    );
+    assert_eq!(
+        serde_json::to_vec(&profit_before)?,
+        serde_json::to_vec(&profit_after)?
+    );
     let mut client = db.get().await?;
     let snapshot = (**client)
         .build_transaction()
@@ -326,6 +382,10 @@ async fn main() -> Outcome<()> {
         .read_auditor_pack(&manager, COMPANY, &artifact.id)
         .await?;
     let (manifest, files) = inspect(&pack.bytes)?;
+    let customer_csv = String::from_utf8(files["receivables-customer.csv"].clone())?;
+    assert!(customer_csv
+        .lines()
+        .any(|row| row.contains("PACK-LEGACY") && row.ends_with(",\"company\",\"20\"")));
     assert_eq!(manifest["through_entry_number"], pin + 1);
     for (name, count) in [
         ("ledger-entry.csv", 503),

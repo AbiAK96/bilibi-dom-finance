@@ -33,6 +33,8 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
     let ar = services.get::<Receivables>(bilibi_finance_receivables::SERVICE)?;
     let ledger = services.get::<Ledger>(bilibi_finance_ledger::SERVICE)?;
     let attachments = services.get::<Attachments>(bilibi_finance_attachments::SERVICE)?;
+    let einvoice =
+        services.get::<bilibi_finance_einvoice::Einvoice>(bilibi_finance_einvoice::SERVICE)?;
     let grants = services.get::<bilibi_authz::grants::Grants>("base/authz.grants")?;
     let client = db.get().await?;
     let admin = sign_in(db, services, 1, 4).await?;
@@ -85,6 +87,26 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
         )
         .await?;
     let party = customer.company.clone().expect("linked to Company 020");
+    let prefill = einvoice.prefill_party(&admin, 1, party.id).await?;
+    let registry = services.get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+    let key = "finance.einvoice.party.prefill";
+    let bilibi_agent_api::Handler::Read(prefill_handler) =
+        registry.operations[key].definition.handler
+    else {
+        panic!("prefill must be a read operation");
+    };
+    let prefill_input = json!({"company_id":1,"counterparty_id":party.id});
+    let agent_prefill = prefill_handler
+        .call(&**client, &admin, &prefill_input)
+        .await?
+        .envelope(key);
+    assert_eq!(agent_prefill["result"], serde_json::to_value(&prefill)?);
+    assert_eq!(prefill.name.as_deref(), Some(party.name.as_str()));
+    assert_eq!(prefill.tax_id, party.tax_id);
+    assert_eq!(prefill.registration_number, party.registration_number);
+    assert_eq!(prefill.email, party.email);
+    assert_eq!(prefill.phone, party.phone);
+    assert!(prefill.address.is_none() && prefill.registration_type.is_none());
     let tax = ar
         .create_tax_code(
             &admin,
@@ -162,6 +184,15 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
     grants
         .set_direct(&admin, admin.user(), bilibi_company::VIEW, Some(false))
         .await?;
+    assert!(matches!(
+        einvoice.prefill_party(&admin, 1, party.id).await,
+        Err(bilibi_finance_einvoice::EinvoiceError::Invalid(fields))
+            if fields.iter().any(|f| f.field == "buyer" && f.message.contains("Companies view permission"))
+    ));
+    assert!(
+        matches!(prefill_handler.call(&**client, &admin, &prefill_input).await,
+        Err(bilibi_agent_api::Error::InvalidInput(fields)) if fields.contains_key("buyer"))
+    );
     field(
         ar.issue_document(&admin, 1, draft.id).await,
         "customer_id",
@@ -171,6 +202,12 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
         .set_direct(&admin, admin.user(), bilibi_company::VIEW, None)
         .await?;
     client.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,4,'companies','tax_id') ON CONFLICT DO NOTHING", &[]).await?;
+    assert!(matches!(einvoice.prefill_party(&admin, 1, party.id).await,
+        Err(bilibi_finance_einvoice::EinvoiceError::Invalid(fields)) if fields.iter().any(|f| f.field == "buyer" && f.message.contains("tax ID is restricted"))));
+    assert!(
+        matches!(prefill_handler.call(&**client, &admin, &prefill_input).await,
+        Err(bilibi_agent_api::Error::InvalidInput(fields)) if fields.contains_key("buyer"))
+    );
     field(
         ar.issue_document(&admin, 1, draft.id).await,
         "customer_id",
@@ -228,6 +265,9 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
     assert_eq!(first.lines, draft.lines);
     assert_eq!(first.tax_lines, draft.tax_lines);
     assert_eq!(first.total, money("110"));
+    let before_rename = ar
+        .aged_receivables(&admin, 1, date(2026, 9, 1), &AgingOptions::default())
+        .await?;
     client
         .execute(
             "UPDATE companies SET legal_name='R2 later party' WHERE tenant_id=1 AND id=20",
@@ -241,6 +281,41 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
     let frozen = ar.get_document(&admin, 1, first.id).await?;
     assert_eq!(frozen.party_name, first.party_name);
     assert_eq!(frozen.party_tax_identifier, first.party_tax_identifier);
+    let after_rename = ar
+        .aged_receivables(
+            &admin,
+            1,
+            date(2026, 9, 1),
+            &AgingOptions {
+                through_entry_number: Some(before_rename.through_entry_number),
+                through_opening_batch_id: Some(before_rename.through_opening_batch_id),
+                ..AgingOptions::default()
+            },
+        )
+        .await?;
+    let find = |r: &bilibi_finance_receivables::AgedReceivables| {
+        r.customers
+            .iter()
+            .find(|c| c.customer_id == customer.id)
+            .cloned()
+            .unwrap()
+    };
+    let (aged_before, aged) = (find(&before_rename), find(&after_rename));
+    assert_eq!(aged_before.name, first.party_name.as_deref().unwrap());
+    assert_eq!(aged.name, "R2 later party");
+    assert_eq!(aged.code, aged_before.code);
+    assert_eq!(aged.total, aged_before.total);
+    assert_eq!(aged.bucket_totals, aged_before.bucket_totals);
+    assert_eq!(after_rename.total, before_rename.total);
+    assert_eq!(
+        after_rename.through_entry_number,
+        before_rename.through_entry_number
+    );
+    assert_eq!(aged.documents.len(), aged_before.documents.len());
+    assert!(aged
+        .documents
+        .iter()
+        .all(|d| d.party_name == first.party_name.as_deref().unwrap()));
     // Attachment labels are capture snapshots; a new capture reads the final source label.
     let final_scan = attachments
         .attach(&admin, 1, source, first.id, &file)
@@ -519,6 +594,16 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
         .expect("R2 customer");
     assert_eq!(baseline_customer.total, money("330").amount());
     let pin = baseline.through_entry_number;
+    let companies = services.get::<bilibi_company::CompanyService>(bilibi_company::SERVICE)?;
+    companies
+        .suspend_company(&admin, party.id, Some("Walkthrough: customer suspended"))
+        .await?;
+    field(
+        ar.create_draft(&admin, 1, &invoice(Some("2026-09-10"), "1"))
+            .await,
+        "customer_id",
+        "is a suspended company; reactivate it in Companies before invoicing",
+    );
     let paid = ar.record_payment(&admin, 1, &valid).await?;
     assert_eq!(paid.payment_number, 2);
     let entry = ledger.get_entry(&admin, 1, paid.ledger_entry_id).await?;
@@ -616,6 +701,9 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
         &json!({"reversal_date":"2026-10-05","reason":"R2 outside receipt window"}),
     )
     .await?;
+    companies
+        .reactivate_company(&admin, party.id, Some("Walkthrough: customer reactivated"))
+        .await?;
     let reproduced = ar
         .aged_receivables(
             &admin,
@@ -1197,6 +1285,42 @@ pub async fn run(db: &Db, services: &Services) -> Result<(), Box<dyn std::error:
         Some(linked_company.name.as_str())
     );
     assert!(legacy_invoice.party_line1.is_none() && legacy_invoice.party_country_iso.is_none());
+    let waiting = ar
+        .create_draft(&admin, 1, &invoice(Some("2026-10-08"), "1"))
+        .await?;
+    companies
+        .archive_company(&admin, party.id, Some("Walkthrough: customer archived"))
+        .await?;
+    field(
+        ar.issue_document(&admin, 1, waiting.id).await,
+        "customer_id",
+        "is an archived company",
+    );
+    ar.reverse_payment(
+        &admin,
+        1,
+        settled.id,
+        &json!({"reversal_date":"2026-10-08","reason":"Archived customer proof"}),
+    )
+    .await?;
+    let archived_payment = ar
+        .record_payment(
+            &admin,
+            1,
+            &payment("2026-10-09", "1", json!([allocation(first.id, "1")])),
+        )
+        .await?;
+    let archived_credit = ar
+        .create_draft(&admin, 1, &credit("2026-10-10", "1"))
+        .await?;
+    ar.issue_document(&admin, 1, archived_credit.id).await?;
+    ar.reverse_payment(
+        &admin,
+        1,
+        archived_payment.id,
+        &json!({"reversal_date":"2026-10-11","reason":"Archived customer proof"}),
+    )
+    .await?;
     println!("NR2 proof passed: numbering and rollback, immutable owned postings, dated/pinned reports, all 13 exports, SQL guards, row audits, tenant isolation, archive read-only (company restored active)");
     Ok(())
 }
